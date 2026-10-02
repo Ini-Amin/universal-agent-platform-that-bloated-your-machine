@@ -8,6 +8,44 @@ with durable state in PostgreSQL, live events, and optional real LLM + embedding
 
 ---
 
+## What UAP can do right now (read this first)
+
+UAP currently runs **two** kinds of tasks — and nothing else yet:
+
+1. **Research** — start your message with `research` and describe the question.
+2. **Bug bounty (bbp)** — name a target, e.g. `bug bounty on example.com. In scope: *.example.com`.
+
+Other domains (learning, coding, data analysis) are recognized but **not implemented**:
+they return a clarification message instead of running. To get work done, phrase your
+request as research or bug bounty. For example, `belajar python dari nol` ("teach me
+Python from scratch") is a *learning* request and will not run — rephrase it as
+`research: best free resources to learn Python from scratch`.
+
+Copy-pasteable examples that work in the task box at the top of the UI (or via
+`POST /tasks` with `{"input": "..."}`):
+
+```text
+research best checkpointing strategies for AI agents
+```
+
+```text
+research: compare SQLite vs PostgreSQL for small apps
+```
+
+```text
+riset perbandingan framework web backend 2026
+```
+
+```text
+Bug bounty on example.com. In scope: *.example.com. Out of scope: legacy.example.com
+```
+
+Each accepted task gets a `task_id` and runs to `completed`; the report appears as an
+artifact in the UI. Indonesian and English phrasings both work (the examples above
+include one of each).
+
+---
+
 ## Step 0 — What you need
 
 | Requirement | Why | Check with |
