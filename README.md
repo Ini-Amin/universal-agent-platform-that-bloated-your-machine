@@ -264,6 +264,53 @@ installed — re-run the two commands above.
 
 ---
 
+### Step 2D — Or use Supabase instead of a local database
+
+Supabase gives you a hosted PostgreSQL with **pgvector already available**, so
+you can skip Steps 2A–2C entirely and run the app with ~92 MB of local RAM
+instead of ~270 MB. Everything UAP needs is supported: PostgreSQL 17, `pgvector`,
+`JSONB`, and — because the app never asks for superuser rights — a plain
+`postgres` connection works.
+
+In the Supabase dashboard: **Project Settings → Database → Connection string**,
+then pick the **Connection pooling** variant, not the direct one.
+
+```bash
+export DATABASE_URL='postgresql+psycopg://postgres.<PROJECT_REF>:<PASSWORD>@aws-0-<REGION>.pooler.supabase.com:6543/postgres'
+```
+
+Then create the extension and migrate:
+
+```bash
+psql "$DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+DATABASE_URL="$DATABASE_URL" alembic upgrade head
+DATABASE_URL="$DATABASE_URL" uvicorn uap.server.app:create_app --factory --port 8000
+```
+
+**Use port `6543` (the pooler), not `5432`.** The direct port allows only a
+handful of concurrent connections; the pooler multiplexes. UAP detects a pooler
+from the URL and automatically:
+
+- disables prepared statements (`prepare_threshold=None`) — a transaction-mode
+  pooler hands each transaction a different backend connection, so a statement
+  prepared in one transaction does not exist in the next. Without this you get
+  ``prepared statement "_pg3_0" already exists``, which looks like a driver bug
+  but is a topology mismatch;
+- bounds the local pool (5 + 5 overflow) so one app does not starve every other
+  client on the same project.
+
+Nothing changes for a direct connection — detection is by host
+(`pooler.supabase.com`, `pgbouncer`) or port (`6543`).
+
+**Two things to know before you rely on it:**
+
+| | |
+|---|---|
+| **Free tier is 1 GB** | At the measured ~40 KB per run that is roughly 25,000 runs. See the retention section below before you get there. |
+| **Artifacts stay local** | Supabase is the database only. Files under `data/runs/artifacts/` are still written to the local disk — UAP has no S3/object-storage backend yet. |
+
+---
+
 ## Step 3 — Create the Python environment
 
 ### Linux / macOS
@@ -497,6 +544,54 @@ DATABASE_URL=postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap_test alem
 | Stop Docker database | `docker stop uap-pg` |
 | Run the full stack (app + DB) | `docker compose up -d --build` |
 | Stop the full stack | `docker compose down` (add `-v` to delete data + artifacts) |
+
+---
+
+## Retention — reclaiming disk (opt-in)
+
+Every run writes ~40 KB that is **never reclaimed by default**: ~27 KB in
+PostgreSQL (`execution_checkpoints` dominates) plus ~13 KB of artifacts on
+disk. Measured on a real database: 2,388 runs occupied **76 MB**, of which
+`execution_checkpoints` alone was **45 MB**. Nothing prunes it automatically —
+no timer, no startup hook. An installation that never runs the command below
+keeps every execution forever.
+
+**Prune from the CLI:**
+
+```bash
+.venv/bin/python -m uap.maintenance prune --older-than-days 30
+```
+
+**Or over HTTP** (behind the same token gate as every other state-changing route):
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/maintenance/prune \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"older_than_days": 30, "limit": 500}'
+```
+
+Only **terminal** runs are eligible (`completed`, `failed`, `cancelled`). A
+`pending`, `running`, `paused`, or `awaiting_approval` run is never deleted,
+however old it is — verified by planting a 999-day-old `running` row and
+confirming it survived a prune that removed a same-aged `completed` row.
+Child rows (checkpoints, events, traces) go with it via `ON DELETE CASCADE`.
+
+`--limit` caps how many executions one call removes, so a large backlog does
+not lock the table; call it repeatedly until it reports 0.
+
+**Space is not returned to the OS until VACUUM runs.** `prune` deletes rows and
+autovacuum reclaims the space for reuse; to shrink the files on disk:
+
+```bash
+psql "$DATABASE_URL" -c 'VACUUM FULL executions, execution_checkpoints, execution_events, decision_traces;'
+```
+
+Measured end-to-end: prune of 2,388 runs + `VACUUM FULL` took the database from
+**76 MB to 15 MB**.
+
+> **`--older-than-days 0` deletes everything terminal, including a run started a
+> second ago.** The CLI refuses it unless you also pass `--yes`. Use a real age.
 
 ---
 

@@ -25,9 +25,10 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from uap.db.models.definitions import (
@@ -259,6 +260,15 @@ class SkillDefinitionRepository(DefinitionRepository):
     version_model = SkillVersion
 
 
+#: Terminal execution statuses: rows in one of these states are finished and
+#: safe to prune. ``pending``/``running``/``paused``/``awaiting_approval`` are
+#: live and must never be deleted out from under a worker.
+TERMINAL_EXECUTION_STATUSES: tuple[ExecutionStatus, ...] = (
+    ExecutionStatus.COMPLETED,
+    ExecutionStatus.FAILED,
+    ExecutionStatus.CANCELLED,
+)
+
 # --------------------------------------------------------------------------- #
 # Executions
 # --------------------------------------------------------------------------- #
@@ -371,6 +381,46 @@ class ExecutionRepository:
         if limit is not None:
             stmt = stmt.limit(limit)
         return list(self._session.execute(stmt).scalars().all())
+
+    def prune(self, cutoff: datetime, *, limit: int | None = None) -> int:
+        """Delete terminal executions whose ``created_at`` is before ``cutoff``.
+
+        Only executions in a terminal status (``completed`` / ``failed`` /
+        ``cancelled``) are eligible; a live run (``pending`` / ``running`` /
+        ``paused`` / ``awaiting_approval``) is never deleted out from under its
+        worker, however old it is. Child rows (``execution_checkpoints``,
+        ``execution_events``, ``decision_traces``) are removed by the
+        ``ON DELETE CASCADE`` foreign keys.
+
+        ``limit`` caps how many executions one call deletes so a large backlog
+        does not lock the table; call repeatedly until the return value is 0.
+        Returns the number of execution rows deleted.
+
+        Retention is strictly opt-in: nothing calls this automatically — no
+        background timer, no startup hook, no default policy. An installation
+        that never invokes ``prune`` keeps every execution forever.
+        """
+
+        if limit is not None and limit <= 0:
+            return 0
+        stmt = delete(Execution).where(
+            Execution.created_at < cutoff,
+            Execution.status.in_(TERMINAL_EXECUTION_STATUSES),
+        )
+        if limit is not None:
+            ids = (
+                select(Execution.id)
+                .where(
+                    Execution.created_at < cutoff,
+                    Execution.status.in_(TERMINAL_EXECUTION_STATUSES),
+                )
+                .order_by(Execution.created_at, Execution.id)
+                .limit(limit)
+            )
+            stmt = delete(Execution).where(Execution.id.in_(ids))
+        result = self._session.execute(stmt)
+        self._session.flush()
+        return int(result.rowcount or 0)
 
 
 # --------------------------------------------------------------------------- #

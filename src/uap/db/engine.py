@@ -65,11 +65,53 @@ def create_db_engine(url: str | None = None, **kwargs: object) -> Engine:
 
     ``pool_pre_ping=True`` is always on. Extra keyword arguments are forwarded
     to :func:`sqlalchemy.create_engine` (e.g. ``echo``, ``connect_args``).
+
+    **Connection poolers (Supabase, pgbouncer, RDS Proxy).** A transaction-mode
+    pooler hands each transaction a different backend connection, so a prepared
+    statement created in one transaction does not exist in the next. psycopg3
+    prepares statements automatically after a few executions, which produces
+    ``prepared statement "_pg3_0" already exists`` or ``does not exist`` —
+    an error that looks like a driver bug but is really a topology mismatch.
+
+    The pooler is detected from the URL (``pooler.supabase.com``, or a
+    ``:6543`` port) and prepared statements are disabled for it. Nothing else
+    changes, and a direct connection keeps automatic preparation.
     """
 
+    resolved = url or get_database_url()
     options: dict[str, object] = {"pool_pre_ping": True, "future": True}
     options.update(kwargs)
-    return create_engine(url or get_database_url(), **options)
+
+    if _is_pooled_connection(resolved):
+        connect_args = dict(options.get("connect_args") or {})  # type: ignore[arg-type]
+        # psycopg3: None disables the automatic PREPARE after N executions.
+        connect_args.setdefault("prepare_threshold", None)
+        options["connect_args"] = connect_args
+        # A pooler multiplexes many clients onto few backends; holding a large
+        # local pool starves everyone else on the same project.
+        options.setdefault("pool_size", 5)
+        options.setdefault("max_overflow", 5)
+        options.setdefault("pool_recycle", 1800)
+
+    return create_engine(resolved, **options)
+
+
+#: Host/port markers of a transaction-mode connection pooler.
+_POOLER_HOST_MARKERS = ("pooler.supabase.com", "pgbouncer")
+_POOLER_PORTS = {"6543"}
+
+
+def _is_pooled_connection(url: str) -> bool:
+    """``True`` when ``url`` points at a transaction-mode connection pooler."""
+
+    lowered = url.lower()
+    if any(marker in lowered for marker in _POOLER_HOST_MARKERS):
+        return True
+    # Match the port only in the netloc, so a password containing ":6543" or a
+    # database name with that number does not trigger it.
+    netloc = lowered.split("@")[-1].split("/")[0]
+    _, _, port = netloc.partition(":")
+    return port.split("?")[0] in _POOLER_PORTS
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

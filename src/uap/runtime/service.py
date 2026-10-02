@@ -537,6 +537,18 @@ class ExecutionService:
                 ),
             }
 
+    def prune_executions(self, cutoff: datetime, *, limit: int | None = None) -> int:
+        """Delete terminal executions older than ``cutoff``; return the count.
+
+        Thin wrapper over :meth:`ExecutionRepository.prune` so callers never
+        touch the repository directly. Retention is opt-in: this runs only
+        when someone explicitly calls it (CLI, HTTP endpoint, or operator
+        script) — there is no automatic pruning anywhere in the platform.
+        """
+
+        with self._scope() as session:
+            return ExecutionRepository(session).prune(cutoff, limit=limit)
+
     def events_since(self, execution_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         """Replay durable events with ``seq > after_seq``, ascending (section 46).
 

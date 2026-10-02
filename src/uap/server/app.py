@@ -122,6 +122,16 @@ class DecisionRequest(BaseModel):
     approved: bool
     decided_by: str
 
+class PruneRequest(BaseModel):
+    """Body of ``POST /api/maintenance/prune``.
+
+    Retention is strictly opt-in: this endpoint does nothing unless an
+    operator explicitly calls it. There is no scheduled or default pruning.
+    """
+
+    older_than_days: int
+    limit: int | None = None
+
 # --------------------------------------------------------------------------- #
 # Run bookkeeping
 # --------------------------------------------------------------------------- #
@@ -1516,6 +1526,29 @@ def create_app(
             "budget": context_data.get("budget", {}),
             "extras": context_data.get("extras", {}),
         }
+    # -- /api/maintenance/prune (opt-in retention) ------------------------ #
+
+    @app.post("/api/maintenance/prune")
+    async def prune_executions(body: PruneRequest) -> dict[str, Any]:
+        """Delete old, terminal executions. Opt-in: nothing runs unless called.
+
+        Behind the app-level token gate like every other state-changing route.
+        """
+        if body.older_than_days < 0:
+            raise HTTPException(status_code=422, detail="older_than_days must be >= 0")
+        if body.limit is not None and body.limit <= 0:
+            raise HTTPException(status_code=422, detail="limit must be positive")
+        svc = getattr(app.state, "service", None)
+        if svc is None or not hasattr(svc, "prune_executions"):
+            raise HTTPException(
+                status_code=503, detail="durable execution service unavailable"
+            )
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=body.older_than_days)
+        deleted = svc.prune_executions(cutoff, limit=body.limit)
+        return {"deleted": deleted, "older_than_days": body.older_than_days}
+
     # -- /api/resources/* ------------------------------------------------ #
 
     @app.get("/api/resources/agents")
