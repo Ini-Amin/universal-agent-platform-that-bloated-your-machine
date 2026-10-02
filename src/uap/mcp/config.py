@@ -17,11 +17,50 @@ rather than silently running. Policy is enforced outside LLM reasoning
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_TIER = 3
+
+
+def _find_bbmcp() -> str:
+    """Locate the bugbounty-mcp binary, or return the documented default.
+
+    The old default was the absolute path ``/home/user/bugbounty-mcp/bbmcp`` —
+    a developer machine path. On any other host MCP silently failed to start and
+    the platform fell back to stub collectors, so a "bug bounty" run produced
+    zero real reconnaissance. Verified 2026-10-03: the binary existed at
+    ``/home/amen/bugbounty-mcp/bbmcp`` and worked, while the configured path did
+    not exist, so MCP never ran.
+
+    Resolution order:
+      1. ``UAP_BBMCP_BIN`` — an explicit override always wins.
+      2. ``bbmcp`` on ``PATH``.
+      3. A sibling checkout next to this repository (``../bugbounty-mcp/bbmcp``).
+      4. The user's home (``~/bugbounty-mcp/bbmcp``).
+      5. The legacy literal, so the failure message stays recognisable.
+    """
+
+    override = os.environ.get("UAP_BBMCP_BIN")
+    if override:
+        return override
+
+    on_path = shutil.which("bbmcp")
+    if on_path:
+        return on_path
+
+    candidates = [
+        Path(__file__).resolve().parents[3].parent / "bugbounty-mcp" / "bbmcp",
+        Path.home() / "bugbounty-mcp" / "bbmcp",
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return "/home/user/bugbounty-mcp/bbmcp"
 
 
 class MCPServerConfig(BaseModel):
@@ -79,10 +118,9 @@ class MCPServerConfig(BaseModel):
 # --------------------------------------------------------------------------- #
 BUG_BOUNTY_MCP_CONFIG = MCPServerConfig(
     name="bugbounty-mcp",
-    # Override with UAP_BBMCP_BIN when the binary lives elsewhere (the default
-    # is where it was built during development; the server degrades gracefully
-    # when the path is missing).
-    command=os.environ.get("UAP_BBMCP_BIN", "/home/user/bugbounty-mcp/bbmcp"),
+    # Discovered, not hardcoded: an absolute developer-machine path made MCP
+    # silently fail on every other host. Override with UAP_BBMCP_BIN.
+    command=_find_bbmcp(),
     args=[],
     env={"CLAUDE_BIN": "claude"},
     tier_map={

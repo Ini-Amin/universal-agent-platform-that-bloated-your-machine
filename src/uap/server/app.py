@@ -442,13 +442,29 @@ def create_app(
     runs_root = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
     event_bus = bus if bus is not None else EventBus()
 
-    # MCP resolution: explicit param > env > disabled.
-    _mcp_wanted = (
-        mcp_enabled
-        if mcp_enabled is not None
-        else os.environ.get("UAP_MCP_ENABLED", "").lower() in {"1", "true", "yes"}
-    )
+    # MCP resolution: explicit param > env > AUTO-DETECT.
+    #
+    # Auto-detect was added because requiring UAP_MCP_ENABLED meant a user with
+    # a perfectly good bugbounty-mcp install got a "bug bounty" workflow that
+    # performed NO reconnaissance and quietly produced stub findings. Verified
+    # 2026-10-03: the binary was present and working, the flag was not set, and
+    # every BBP run was a no-op that still reported "completed".
+    #
+    # Rules:
+    #   - an explicit param always wins;
+    #   - UAP_MCP_ENABLED=0/false/no forces it OFF even when the binary exists;
+    #   - otherwise, start it when the configured binary is present and runnable.
     _mcp_cfg = mcp_config if mcp_config is not None else BUG_BOUNTY_MCP_CONFIG
+    _env_flag = os.environ.get("UAP_MCP_ENABLED", "").strip().lower()
+    if mcp_enabled is not None:
+        _mcp_wanted = mcp_enabled
+    elif _env_flag in {"0", "false", "no"}:
+        _mcp_wanted = False
+    elif _env_flag in {"1", "true", "yes"}:
+        _mcp_wanted = True
+    else:
+        _mcp_bin = Path(str(_mcp_cfg.command))
+        _mcp_wanted = _mcp_bin.is_file() and os.access(_mcp_bin, os.X_OK)
 
     jsonl_sink = JsonlSink(runs_root / "events.jsonl")
     memory_sink = MemorySink(max_events=max_events)
@@ -843,6 +859,14 @@ def create_app(
                 runs[result.execution_id] = record
             record.workspace_id = result.workspace_id or record.workspace_id
             record.context = result.context
+            # Report the evidence source HONESTLY. This field was hardcoded to
+            # "deterministic-stubs" and never updated, so a run that really
+            # called bugbounty-mcp (crt.sh subdomain enumeration, live HTTP
+            # probes) still told the user its findings were fake — and a run
+            # that really used stubs claimed nothing at all. Verified
+            # 2026-10-03: MCP tools were invoked, the subdomains matched crt.sh
+            # exactly, and the label still said "deterministic-stubs".
+            record.evidence_source = _evidence_source_for(record.task_id, app)
             # SliceResult.artifacts holds artifact IDS; the store writes files
             # named "{artifact_id}__v{n}__{source}" under artifacts_root/<task_id>/
             # with a sidecar .meta.json carrying the real artifact type.
@@ -1133,6 +1157,25 @@ def create_app(
         if wf is not None and hasattr(wf, "graph_spec"):
             return wf.graph_spec()
         return None
+
+    def _evidence_source_for(task_id: str, app_ref: Any) -> str:
+        """What actually produced this run's evidence.
+
+        Derived from what the run DID, never assumed. The value is user-facing:
+        a security researcher must be able to tell a real crt.sh result from a
+        fixture, and the previous hardcoded label said "stubs" for both.
+        """
+
+        mcp_calls = 0
+        for ev in memory_sink.query(task_id=task_id):
+            kind = str(getattr(ev, "kind", "") or "")
+            if "mcp" in kind.lower():
+                mcp_calls += 1
+        if mcp_calls:
+            return f"mcp:{mcp_calls}-calls"
+        if getattr(app_ref.state, "mcp_client", None) is not None:
+            return "mcp-available-no-calls"
+        return "deterministic-stubs"
 
     def _node_statuses(task_id: str) -> tuple[dict[str, str], bool]:
         """Derive per-node status from observability events.
