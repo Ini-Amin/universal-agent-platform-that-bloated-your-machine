@@ -296,11 +296,15 @@ class ExecutionService:
         inputs: dict[str, Any],
         correlation_id: str | None = None,
         workspace_id: str | None = None,
+        requested_by: str | None = None,
     ) -> str:
         """Create a queued execution and record its ``EXECUTION_STARTED`` event.
 
         Returns the new execution id (a string). The graph is resolved eagerly so
         a bad ``workflow_ref`` fails at enqueue time, not at run time.
+
+        ``requested_by`` attributes the run to a requester identity (audit trail;
+        not an authentication boundary — callers can claim any identity).
         """
 
         # Validate the graph resolves before touching the database.
@@ -314,6 +318,7 @@ class ExecutionService:
                 input=dict(inputs),
                 correlation_id=corr,
                 status=STATUS_QUEUED,
+                requested_by=requested_by,
             )
             meta: dict[str, Any] = {"workflow_ref": workflow_ref}
             if workspace_id is not None:
@@ -458,6 +463,7 @@ class ExecutionService:
                 input=self._user_inputs(source),
                 correlation_id=source.correlation_id,
                 status=STATUS_QUEUED,
+                requested_by=source.requested_by,
             )
             child_meta: dict[str, Any] = {
                 "workflow_ref": source_meta.get("workflow_ref"),
@@ -535,6 +541,7 @@ class ExecutionService:
                 "heartbeat_at": (
                     row.heartbeat_at.isoformat() if row.heartbeat_at else None
                 ),
+                "requested_by": row.requested_by,
             }
 
     def prune_executions(self, cutoff: datetime, *, limit: int | None = None) -> int:

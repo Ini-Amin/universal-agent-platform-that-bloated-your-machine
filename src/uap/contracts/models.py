@@ -10,7 +10,7 @@ nothing about the UI, the database, HTTP routes, MCP, or LangGraph internals
 import uuid
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -41,6 +41,7 @@ __all__ = [
     "AgentResult",
     "WorkflowState",
     "WorkflowResult",
+    "NodeView",
 ]
 
 
@@ -337,4 +338,40 @@ class WorkflowResult(BaseModel):
     artifacts: list[Artifact] = Field(default_factory=list)
     verification: VerificationResult | None = None
     error: str | None = None
+
+class NodeView(BaseModel):
+    """What a node's work looks like on the canvas (canvas-as-stage).
+
+    A node publishes a *view* so the user sees what the work PRODUCED, not just
+    that the node turned green. The canvas renders one of ``kind``:
+
+    * ``markdown`` / ``code`` -> ``text`` (``language`` for code fences).
+    * ``image`` / ``video`` / ``iframe`` -> ``url`` (+ ``caption``).
+    * ``html`` -> ``text`` (the UI may render it in a sandbox).
+    * ``whiteboard`` -> ``url`` (defaults to a hosted Excalidraw).
+    * ``placeholder`` -> ``text``/``caption`` naming why nothing rendered.
+
+    Deliberately **permissive** (``extra="allow"``): unlike the strict core
+    contracts, a view is a renderer hint bag. The UI owns rendering and may read
+    additional keys (``poster``, ``alt``, ``sandbox``, ``html`` ...) without the
+    backend having to model each one. Required shape is only ``kind``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: Literal[
+        "html",
+        "markdown",
+        "image",
+        "video",
+        "iframe",
+        "code",
+        "whiteboard",
+        "placeholder",
+    ]
+    title: str = ""
+    url: str | None = None
+    text: str | None = None
+    caption: str | None = None
+    language: str | None = None
 

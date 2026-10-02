@@ -147,10 +147,20 @@ def test_knowledge_provenance_unknown(client: TestClient):
 
 
 def test_task_response_has_honesty_metadata(client: TestClient):
-    res = client.post(
-        "/tasks", json={"input": "research AI safety"}
-    ).json()
-    assert res["evidence_source"] == "deterministic-stubs"
+    """The response must declare what actually produced the evidence.
+
+    This used to assert the literal "deterministic-stubs". That value was
+    hardcoded and never updated, so a run that really queried crt.sh through
+    bugbounty-mcp still told the user its findings were fixtures (found
+    2026-10-03). The property that matters is that the field is present and
+    tells the truth about the run — not that it holds one frozen string.
+    """
+    res = client.post("/tasks", json={"input": "research AI safety"}).json()
+    source = res["evidence_source"]
+    assert isinstance(source, str) and source
+    # One of the honest states: MCP was used, MCP was available, or it was
+    # genuinely a stub run. Never an empty or unknown label.
+    assert source.startswith(("mcp", "deterministic-stubs")), source
 
 
 def test_task_response_echoes_workspace_id(client: TestClient):

@@ -25,6 +25,7 @@ from uap.contracts import (
     Memory,
     MemoryCategory,
     Observation,
+    NodeView,
     TaskMode,
     TaskSpec,
     TokenUsage,
@@ -539,6 +540,7 @@ MINIMAL_INSTANCES: dict[str, BaseModel] = {
     "WorkflowResult": WorkflowResult(
         task_id="t", workflow="w", status=WorkflowStatus.COMPLETED, output=""
     ),
+    "NodeView": NodeView(kind="placeholder"),
 }
 
 

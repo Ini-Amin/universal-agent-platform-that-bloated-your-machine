@@ -255,7 +255,13 @@ def test_bug_bounty_config_maps_all_eleven_documented_tools():
         "test_mcp_server": 3,
     }
     assert BUG_BOUNTY_MCP_CONFIG.name == "bugbounty-mcp"
-    assert BUG_BOUNTY_MCP_CONFIG.command == "/home/user/bugbounty-mcp/bbmcp"
+    # The command is DISCOVERED, not a hardcoded developer path. The old
+    # assertion pinned "/home/user/bugbounty-mcp/bbmcp", which made MCP fail to
+    # start on every host but the author's — a bug bounty run then produced zero
+    # reconnaissance and still reported "completed" (found 2026-10-03).
+    # It must be an absolute, executable-or-fallback path ending in bbmcp.
+    assert BUG_BOUNTY_MCP_CONFIG.command.endswith("bbmcp"), BUG_BOUNTY_MCP_CONFIG.command
+    assert BUG_BOUNTY_MCP_CONFIG.command.startswith("/"), BUG_BOUNTY_MCP_CONFIG.command
     assert BUG_BOUNTY_MCP_CONFIG.args == []
     assert BUG_BOUNTY_MCP_CONFIG.tier_map == expected
     assert len(BUG_BOUNTY_MCP_CONFIG.tier_map) == 11

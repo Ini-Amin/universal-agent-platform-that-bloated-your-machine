@@ -111,6 +111,9 @@
             <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
             <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
             <span class="toolbar-sep"></span>
+            <button id="btn-toggle-sidebar" class="btn" title="Hide the left sidebar (Ctrl+B)">◧ Side</button>
+            <button id="btn-toggle-inspector" class="btn" title="Hide the right panel (Ctrl+I)">Panel ◨</button>
+            <span class="toolbar-sep"></span>
             <button id="btn-toggle-strip" class="btn" title="Hide the workflow strip">Strip</button>
             <button id="btn-fullscreen-stage" class="btn" title="Fullscreen the stage">Fullscreen</button>
           </div>
@@ -344,6 +347,61 @@
     // Collapse / expand the workflow strip.
     document.getElementById('btn-toggle-strip')?.addEventListener('click', () => setStripCollapsed(!stripCollapsed));
     stripRevealEl?.addEventListener('click', () => setStripCollapsed(false));
+
+    // Left sidebar and right inspector can each be collapsed so the stage gets
+    // the full width. Collapsing hides the pane and shows a thin edge handle;
+    // clicking (or hovering) the handle brings it back. Same pattern as the
+    // workflow strip, which the owner asked to extend to both side panes.
+    const sidebarEl = document.getElementById('sidebar');
+    const inspectorEl = document.getElementById('inspector');
+
+    function makeCollapsible(paneEl, btnEl, side, label) {
+      if (!paneEl) return { toggle: () => {}, isCollapsed: () => false };
+
+      // Edge handle: a thin strip at the screen edge that restores the pane.
+      const handle = document.createElement('button');
+      handle.className = `pane-reveal pane-reveal-${side}`;
+      handle.type = 'button';
+      handle.title = `Show the ${label}`;
+      handle.setAttribute('aria-label', `Show the ${label}`);
+      handle.textContent = side === 'left' ? '›' : '‹';
+      document.body.appendChild(handle);
+
+      let collapsed = false;
+      function apply(next) {
+        collapsed = next;
+        paneEl.classList.toggle('pane-collapsed', collapsed);
+        document.body.classList.toggle(`hide-${side}-pane`, collapsed);
+        handle.classList.toggle('pane-reveal-visible', collapsed);
+        if (btnEl) {
+          btnEl.classList.toggle('active', collapsed);
+          btnEl.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+        }
+      }
+      handle.addEventListener('click', () => apply(false));
+      if (btnEl) btnEl.addEventListener('click', () => apply(!collapsed));
+
+      return {
+        toggle: () => apply(!collapsed),
+        isCollapsed: () => collapsed,
+      };
+    }
+
+    const sidebarToggle = makeCollapsible(sidebarEl, document.getElementById('btn-toggle-sidebar'), 'left', 'sidebar');
+    const inspectorToggle = makeCollapsible(inspectorEl, document.getElementById('btn-toggle-inspector'), 'right', 'output panel');
+
+    // Keyboard shortcuts, mirroring common editor conventions.
+    document.addEventListener('keydown', (e) => {
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        sidebarToggle.toggle();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        inspectorToggle.toggle();
+      }
+    });
 
     // Fullscreen: the stage fills the screen. On entering, the strip is
     // collapsed so the left-edge `>` handle is the way back.

@@ -1545,6 +1545,66 @@ textarea:focus-visible,
 
 body.stage-fullscreen .canvas-stage-area.strip-collapsed .strip-reveal { display: flex; }
 
+/* --- Collapsible side panes: the stage takes the full width ---
+   The owner asked for this after seeing that only the workflow strip could be
+   hidden: with a 280px sidebar and a 420px inspector, the actual work area was
+   ~55% of the screen. Each pane collapses to a thin edge handle that restores
+   it on click or hover. */
+.pane-collapsed {
+  display: none !important;
+}
+
+.pane-reveal {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 64px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--accent);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 40;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, width 0.15s ease;
+}
+
+.pane-reveal-left {
+  left: 0;
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+}
+
+.pane-reveal-right {
+  right: 0;
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+}
+
+.pane-reveal-visible {
+  display: flex;
+}
+
+.pane-reveal:hover,
+.pane-reveal:focus-visible {
+  opacity: 1;
+  width: 20px;
+  outline: none;
+}
+
+/* A collapsed toolbar button reads as "off". */
+.toolbar-group .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* Floating exit control, only while the stage is fullscreen. */
 .stage-exit-fs {
   display: none;

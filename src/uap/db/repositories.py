@@ -288,6 +288,7 @@ class ExecutionRepository:
         input: Mapping[str, Any] | None = None,
         correlation_id: uuid.UUID | None = None,
         status: ExecutionStatus = ExecutionStatus.PENDING,
+        requested_by: str | None = None,
     ) -> Execution:
         """Insert a new execution pinned to ``workflow_version_id``.
 
@@ -300,6 +301,7 @@ class ExecutionRepository:
             status=status,
             input=dict(input) if input is not None else {},
             correlation_id=correlation_id,
+            requested_by=requested_by,
         )
         self._session.add(row)
         self._session.flush()
@@ -367,6 +369,7 @@ class ExecutionRepository:
         *,
         status: ExecutionStatus | None = None,
         workflow_version_id: uuid.UUID | None = None,
+        requested_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Execution]:
@@ -377,6 +380,8 @@ class ExecutionRepository:
             stmt = stmt.where(Execution.status == status)
         if workflow_version_id is not None:
             stmt = stmt.where(Execution.workflow_version_id == workflow_version_id)
+        if requested_by is not None:
+            stmt = stmt.where(Execution.requested_by == requested_by)
         stmt = stmt.order_by(Execution.created_at.desc(), Execution.id.desc())
         if offset:
             stmt = stmt.offset(offset)

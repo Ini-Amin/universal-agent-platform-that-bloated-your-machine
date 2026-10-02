@@ -15,7 +15,11 @@ from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG, MCPServerConfig
 
 
 def test_command_display_hides_the_host_path() -> None:
-    assert BUG_BOUNTY_MCP_CONFIG.command == "/home/user/bugbounty-mcp/bbmcp"
+    # `command` is now DISCOVERED rather than a hardcoded developer path, so
+    # assert the PROPERTY that matters: the real path is absolute, and the
+    # display form leaks no directory component.
+    assert BUG_BOUNTY_MCP_CONFIG.command.startswith("/")
+    assert BUG_BOUNTY_MCP_CONFIG.command.endswith("bbmcp")
     assert BUG_BOUNTY_MCP_CONFIG.command_display == "bbmcp"
     assert os.sep not in BUG_BOUNTY_MCP_CONFIG.command_display
 

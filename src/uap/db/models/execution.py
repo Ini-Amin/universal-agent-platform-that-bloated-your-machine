@@ -35,6 +35,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -125,6 +126,11 @@ class Execution(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    #: Requester attribution (audit trail of who asked for this run; NOT an
+    #: authentication or security boundary — callers can claim any identity;
+    #: nullable so existing rows stay valid, and omitted user_id stays NULL).
+    requested_by: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
 
     events: Mapped[list["ExecutionEvent"]] = relationship(
         back_populates="execution",

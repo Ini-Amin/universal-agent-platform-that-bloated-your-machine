@@ -18,6 +18,8 @@ a failed node (never a crashed run).
 from __future__ import annotations
 
 import logging
+import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from uap.observability.errors import log_swallowed_exception
@@ -28,6 +30,7 @@ from uap.contracts import (
     AgentContext,
     AgentStatus,
     ContextSection,
+    NodeView,
     TaskSpec,
     WorkflowState,
 )
@@ -103,6 +106,18 @@ class PlatformNodeRuntime:
     async def run_node(
         self, node: GraphNode, inputs: dict[str, Any], ctx: ExecutionContext
     ) -> dict[str, Any]:
+        # Dispatch the node to its real backend first; a published view is
+        # ADDITIONAL output attached to (never replacing) the normal result.
+        result = await self._dispatch(node, inputs, ctx)
+        view = self._view_for(node, result)
+        if view is not None:
+            self._publish_view(node, view, ctx)
+            self._attach_view(result, view)
+        return result
+
+    async def _dispatch(
+        self, node: GraphNode, inputs: dict[str, Any], ctx: ExecutionContext
+    ) -> dict[str, Any]:
         # Pipeline nodes (config["pipeline_node"]) run the REAL workflow node
         # functions — this is what keeps the durable slice honest.
         pipeline_node = node.config.get("pipeline_node")
@@ -125,6 +140,134 @@ class PlatformNodeRuntime:
         # INPUT / PARALLEL / JOIN / CONDITION are handled by the engine itself;
         # if one still reaches a runtime, pass its inputs straight through.
         return {_primary_output(node): _collect_text(inputs)}
+
+    # ------------------------------------------------------------------ #
+    # Node views (canvas-as-stage): make the node's WORK visible
+    # ------------------------------------------------------------------ #
+
+    def _view_for(
+        self, node: GraphNode, result: dict[str, Any]
+    ) -> NodeView | None:
+        """The view this node should publish, or ``None``.
+
+        An explicit ``config["view"]`` always wins (a string is treated as
+        markdown). Otherwise a synthesis/report node publishes a default
+        markdown view built from its real output, so the canvas shows the
+        work product without the graph author wiring anything.
+        """
+        spec = node.config.get("view")
+        if spec is not None:
+            return self._coerce_view(spec, node)
+        if self._is_report_node(node):
+            return self._default_report_view(node, result)
+        return None
+
+    @staticmethod
+    def _is_report_node(node: GraphNode) -> bool:
+        return node.kind is NodeKind.SYNTHESIS or node.id in ("synthesis", "report")
+
+    def _coerce_view(self, spec: Any, node: GraphNode) -> NodeView:
+        """Build a :class:`NodeView` from a config spec, never raising.
+
+        A malformed spec degrades to a ``placeholder`` naming the problem, so a
+        typo in a node's config is visible on the canvas instead of silently
+        producing no view.
+        """
+        if isinstance(spec, NodeView):
+            return spec
+        if isinstance(spec, str):
+            return NodeView(kind="markdown", title=node.title or node.id, text=spec)
+        if isinstance(spec, Mapping):
+            data = dict(spec)
+            data.setdefault("title", node.title or node.id)
+            try:
+                return NodeView.model_validate(data)
+            except Exception as exc:  # noqa: BLE001 - a bad spec is data, not a crash
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "invalid node view spec; publishing a placeholder",
+                    level=logging.WARNING,
+                    node=node.id,
+                )
+                return NodeView(
+                    kind="placeholder",
+                    title=node.title or node.id,
+                    text=f"invalid view spec: {type(exc).__name__}",
+                    caption=str(exc)[:280],
+                )
+        return NodeView(
+            kind="placeholder",
+            title=node.title or node.id,
+            text=f"unsupported view spec type: {type(spec).__name__}",
+        )
+
+    def _default_report_view(
+        self, node: GraphNode, result: dict[str, Any]
+    ) -> NodeView:
+        content = ""
+        for value in result.values():
+            if isinstance(value, Mapping) and value.get("content"):
+                content = value["content"]
+                break
+        if not isinstance(content, str):
+            content = str(content)
+        return NodeView(
+            kind="markdown",
+            title=node.title or node.id,
+            text=content,
+            caption=f"published by node {node.id}",
+        )
+
+    @staticmethod
+    def _attach_view(result: dict[str, Any], view: NodeView) -> None:
+        """Attach the published view to every dict-valued output port."""
+        payload = view.model_dump(mode="json")
+        for port, value in list(result.items()):
+            if isinstance(value, dict):
+                value["view"] = payload
+            else:
+                result[port] = {"content": value, "view": payload}
+
+    def _publish_view(
+        self, node: GraphNode, view: NodeView, ctx: ExecutionContext
+    ) -> None:
+        """Persist ``view`` durably so it survives a page reload.
+
+        Best-effort: a persistence failure must never fail the node (the view is
+        still attached to the node's returned output).
+        """
+        if self.session_factory is None:
+            return
+        execution_id = str(getattr(ctx, "execution_id", "") or "")
+        try:
+            uuid.UUID(execution_id)
+        except (ValueError, TypeError, AttributeError):
+            return  # subworkflow / non-UUID id: not a top-level execution
+        try:
+            from uap.db.engine import session_scope
+            from uap.db.repositories import EventRepository
+            from uap.views.store import NODE_VIEW_EVENT_KIND, NodeViewStore
+
+            with session_scope(self.session_factory) as session:
+                NodeViewStore(session).publish(execution_id, node.id, view)
+                # Mirror into the append-only log so the live UI can surface the
+                # view the moment it is published, without polling the table.
+                EventRepository(session).append(
+                    uuid.UUID(execution_id),
+                    NODE_VIEW_EVENT_KIND,
+                    node=node.id,
+                    payload={"kind": view.kind, "title": view.title},
+                )
+        except Exception as exc:  # noqa: BLE001 - persistence is additive
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to persist node view",
+                level=logging.WARNING,
+                node=node.id,
+                execution_id=execution_id,
+            )
 
     # ------------------------------------------------------------------ #
     # PIPELINE (real research/bbp node functions)

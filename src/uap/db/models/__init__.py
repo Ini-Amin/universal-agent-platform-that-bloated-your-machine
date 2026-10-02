@@ -25,6 +25,7 @@ from uap.db.models.knowledge import (
     KnowledgeProvenanceRow,
 )
 from uap.db.models.trace import DecisionTraceRow
+from uap.db.models.view import NodeViewRow
 from uap.db.models.workspace import WorkspaceRow
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "KnowledgeEventRow",
     "KnowledgeItemRow",
     "KnowledgeProvenanceRow",
+    "NodeViewRow",
     "SkillDefinition",
     "SkillVersion",
     "ToolDefinition",

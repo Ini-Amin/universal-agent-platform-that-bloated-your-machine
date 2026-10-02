@@ -166,6 +166,7 @@ class RunRecord:
     pending_approvals: list[dict[str, Any]] = field(default_factory=list)
     context: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.monotonic)
+    requested_by: str | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -173,6 +174,7 @@ class RunRecord:
             "domain": self.domain,
             "workflow": self.workflow,
             "status": self.status,
+            "requested_by": self.requested_by,
         }
 
     def detail(self) -> dict[str, Any]:
@@ -1049,6 +1051,7 @@ def create_app(
             workflow=decision.workflow_name or RESEARCH_WORKFLOW_NAME,
             input=raw_input,
             workspace_id=workspace_id,
+            requested_by=user_id,
         )
         runs[spec.task_id] = record
         get_control(spec.task_id)  # register run-control gate
@@ -1096,7 +1099,12 @@ def create_app(
         )
 
     @app.get("/tasks")
-    async def list_tasks() -> list[dict[str, Any]]:
+    async def list_tasks(requested_by: str | None = None) -> list[dict[str, Any]]:
+        """List tracked runs, optionally filtered by requester identity.
+
+        NOTE: This provides attribution for audit purposes, not authentication.
+        A caller can claim any user_id, so this is not a security boundary.
+        """
         # A run may be registered under several keys (task_id, execution_id,
         # pre-rewrite task_id) pointing at the SAME RunRecord. Deduplicate by
         # object identity so each logical run is listed exactly once; the
@@ -1104,7 +1112,10 @@ def create_app(
         seen: dict[int, RunRecord] = {}
         for record in runs.values():
             seen.setdefault(id(record), record)
-        return [record.summary() for record in seen.values()]
+        results = [record.summary() for record in seen.values()]
+        if requested_by is not None:
+            results = [r for r in results if r.get("requested_by") == requested_by]
+        return results
 
     @app.get("/tasks/{task_id}")
     async def get_task(task_id: str) -> dict[str, Any]:
@@ -1509,6 +1520,57 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown execution")
 
         return traces
+
+    # -- /api/executions/{id}/views -------------------------------------- #
+
+    @app.get("/api/executions/{execution_id}/views")
+    async def get_execution_views(execution_id: str) -> list[dict[str, Any]]:
+        """Return the views nodes published for this execution.
+
+        Accepts EITHER the durable row id OR the client-facing correlation id
+        (the id ``POST /tasks`` handed the UI), exactly like the events/context
+        read APIs. Each item is ``{node_id, view, created_at}``.
+        """
+        found = False
+        views: list[dict[str, Any]] = []
+        svc = getattr(app.state, "service", None)
+        slc = getattr(app.state, "slice", None)
+        factory = getattr(slc, "_session_factory", None) or getattr(svc, "_session_factory", None)
+        try:
+            import uuid as _uuid
+            from uap.db.engine import session_scope
+            from uap.db.repositories import ExecutionRepository
+            from uap.views.store import NodeViewStore
+
+            with session_scope(factory) as session:
+                try:
+                    eid = _uuid.UUID(str(execution_id))
+                    repo = ExecutionRepository(session)
+                    row = repo.get(eid) or repo.get_by_correlation_id(eid)
+                    if row is not None:
+                        found = True
+                        # Views are keyed on the execution row's own id, which may
+                        # differ from the client-facing correlation id.
+                        views = NodeViewStore(session).list_for_execution(str(row.id))
+                except (ValueError, TypeError):
+                    pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to query execution views from database",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
+
+        if not found and execution_id in runs:
+            found = True
+            views = []
+
+        if not found:
+            raise HTTPException(status_code=404, detail="unknown execution")
+
+        return views
 
     # -- /api/executions/{id}/context ------------------------------------ #
 

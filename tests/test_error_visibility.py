@@ -215,7 +215,7 @@ def test_healthy_path_key_response_shapes_unchanged(tmp_path: Path) -> None:
     assert tasks_res.status_code == 200
     summaries = tasks_res.json()
     assert len(summaries) >= 1
-    assert set(summaries[0].keys()) == {"task_id", "domain", "workflow", "status"}
+    assert set(summaries[0].keys()) == {"task_id", "domain", "workflow", "status", "requested_by"}
 
     # GET /tasks/{id} detail
     detail_res = client.get(f"/tasks/{task_id}")
@@ -234,6 +234,7 @@ def test_healthy_path_key_response_shapes_unchanged(tmp_path: Path) -> None:
         "workspace_id",
         "evidence_source",
         "pending_approvals",
+        "requested_by",
     }
 
     # GET /api/executions/{id}/graph

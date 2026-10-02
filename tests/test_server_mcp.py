@@ -58,7 +58,24 @@ def _fake_registry() -> ToolRegistry:
 
 
 def test_default_boot_has_no_mcp_tools(tmp_path: Path, monkeypatch):
+    """MCP stays OFF when the binary is absent, even with auto-detection.
+
+    Behaviour change (2026-10-03): MCP now AUTO-DETECTS instead of requiring
+    `UAP_MCP_ENABLED=1`. That env var previously gated it, so a user with a
+    working bugbounty-mcp install got a bounty workflow that performed no
+    reconnaissance and still reported "completed". Auto-detection starts MCP
+    only when the configured binary exists and is executable — so with a
+    non-existent command, boot must still leave it off.
+    """
     monkeypatch.delenv("UAP_MCP_ENABLED", raising=False)
+    monkeypatch.setenv("UAP_BBMCP_BIN", str(tmp_path / "does-not-exist" / "bbmcp"))
+    # Rebuild the config so the env override takes effect for this app.
+    from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG
+
+    monkeypatch.setattr(
+        "uap.server.app.BUG_BOUNTY_MCP_CONFIG",
+        BUG_BOUNTY_MCP_CONFIG.model_copy(update={"command": str(tmp_path / "nope" / "bbmcp")}),
+    )
     bus, sink = _bus_with_memory()
     app = create_app(bus=bus, runs_dir=tmp_path, run_inline=True)
     with TestClient(app) as client:
@@ -66,6 +83,38 @@ def test_default_boot_has_no_mcp_tools(tmp_path: Path, monkeypatch):
         assert app.state.mcp_client is None
         assert client.get("/legacy/").status_code == 200
     assert sink.query(kind=EventKind.MCP_CALL) == []
+
+
+def test_mcp_auto_starts_when_the_binary_exists(tmp_path: Path, monkeypatch):
+    """A present, executable binary is enough — no env var required.
+
+    This is the fix: requiring the env flag meant the feature was silently off
+    for anyone who did not know about it.
+    """
+    monkeypatch.delenv("UAP_MCP_ENABLED", raising=False)
+    fake = tmp_path / "bbmcp"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG
+
+    monkeypatch.setattr(
+        "uap.server.app.BUG_BOUNTY_MCP_CONFIG",
+        BUG_BOUNTY_MCP_CONFIG.model_copy(update={"command": str(fake)}),
+    )
+
+    started = {}
+
+    def _fake_start(cfg):
+        started["command"] = cfg.command
+        return None, None  # start_mcp_tools returns (registry, client)
+
+    monkeypatch.setattr("uap.server.app.start_mcp_tools", _fake_start, raising=False)
+    bus, _sink = _bus_with_memory()
+    app = create_app(bus=bus, runs_dir=tmp_path, run_inline=True)
+    with TestClient(app):
+        # The point: the code TRIED to start it without being asked.
+        assert started.get("command") == str(fake), started
 
 
 # --------------------------------------------------------------------------- #

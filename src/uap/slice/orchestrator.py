@@ -810,6 +810,7 @@ class PlatformSlice:
                 inputs={"value": task.goal},
                 correlation_id=task.task_id,
                 workspace_id=workspace.id,
+                requested_by=user_id,
             )
             out.execution_id = execution_id
             # Run THIS execution. `run_once()` claims the OLDEST pending row,
