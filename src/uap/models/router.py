@@ -12,11 +12,12 @@ The rationale string returned in :class:`RoutingDecision` is the structured
 
 from __future__ import annotations
 
-from typing import Callable
+import re
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from uap.contracts import TokenUsage
+from uap.contracts import Domain, TokenUsage
 from uap.models.budget import BudgetTracker
 from uap.models.catalog import ModelCapability, ModelCatalog, ModelInfo
 from uap.models.policy import BudgetPolicy, PolicyResolver
@@ -26,6 +27,10 @@ __all__ = [
     "RoutingDecision",
     "RoutingError",
     "ModelRouter",
+    "DOMAIN_CAPABILITY_MAP",
+    "DOMAIN_RATIONALE",
+    "SPEED_KEYWORDS",
+    "capability_for",
 ]
 
 #: Lower rank = preferred when ``prefer="latency"``.
@@ -39,6 +44,135 @@ _QUALITY_ORDER = (
     ModelCapability.FAST,
     ModelCapability.EMBEDDING,
 )
+
+#: Documented domain to ModelCapability mapping table (Master section 33).
+DOMAIN_CAPABILITY_MAP: dict[str, ModelCapability] = {
+    Domain.RESEARCH.value: ModelCapability.REASONING,
+    Domain.BBP.value: ModelCapability.REASONING,
+    Domain.CODING.value: ModelCapability.CODING,
+    Domain.LEARNING.value: ModelCapability.REASONING,
+    Domain.DATA.value: ModelCapability.FAST,
+    Domain.UNKNOWN.value: ModelCapability.REASONING,
+}
+
+#: Documented rationale explaining why each domain maps to its capability.
+DOMAIN_RATIONALE: dict[str, str] = {
+    Domain.RESEARCH.value: "research tasks require deep reasoning and evidence evaluation",
+    Domain.BBP.value: "security recon requires analysis-heavy vulnerability assessment",
+    Domain.CODING.value: "coding tasks require code generation, refactoring, and AST manipulation",
+    Domain.LEARNING.value: "learning tasks require conceptual explanation and reasoning",
+    Domain.DATA.value: "data analysis tasks favor fast transformation and summarization",
+    Domain.UNKNOWN.value: "unknown domain defaults to general reasoning capability",
+}
+
+#: Keywords in goal/prompt indicating explicit request for speed or summarisation.
+SPEED_KEYWORDS: frozenset[str] = frozenset({
+    "fast",
+    "speed",
+    "quick",
+    "rapid",
+    "summarize",
+    "summarise",
+    "summary",
+    "summarization",
+    "summarisation",
+    "latency",
+})
+
+
+def capability_for(
+    domain: Any = None,
+    goal: str | None = None,
+    *,
+    task: Any = None,
+    constraints: dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
+) -> ModelCapability:
+    """Derive the required ModelCapability from domain, goal, or task context.
+
+    Routing rules:
+    1. Speed/Summarisation precedence: Any task explicitly requesting speed or
+       summarisation (via keywords in the goal such as 'fast', 'quick', 'speed',
+       'summarize', 'summary', or flags in constraints/extras like prefer='latency',
+       fast=True, or domain='fast') maps to ModelCapability.FAST.
+    2. Coding: Domain.CODING ('coding') maps to ModelCapability.CODING for code
+       generation, refactoring, syntax analysis, and debugging.
+    3. Research: Domain.RESEARCH ('research') maps to ModelCapability.REASONING
+       for deep literature synthesis, trade-off analysis, and critical evaluation.
+    4. Security Recon (BBP): Domain.BBP ('bbp') maps to ModelCapability.REASONING
+       because security reconnaissance and vulnerability discovery are analysis-heavy.
+    5. Other Domains: Domain.LEARNING maps to ModelCapability.REASONING; Domain.DATA
+       maps to ModelCapability.FAST; unknown/unspecified domains default to
+       ModelCapability.REASONING.
+
+    Parameters:
+        domain: Domain enum, string domain name, or TaskSpec instance.
+        goal: Task goal string or prompt.
+        task: Optional TaskSpec instance from which domain, goal, and constraints
+            are extracted if not explicitly supplied.
+        constraints: Optional constraint dictionary from TaskSpec.
+        extras: Optional extras dictionary from AgentContext.
+
+    Returns:
+        ModelCapability: The capability to request from ModelRouter.
+    """
+    if hasattr(domain, "domain") and hasattr(domain, "goal"):
+        task = domain
+        domain = getattr(task, "domain", None)
+        if goal is None:
+            goal = getattr(task, "goal", None)
+        if constraints is None:
+            constraints = getattr(task, "constraints", None)
+
+    if task is not None:
+        if domain is None:
+            domain = getattr(task, "domain", None)
+        if goal is None:
+            goal = getattr(task, "goal", None)
+        if constraints is None:
+            constraints = getattr(task, "constraints", None)
+
+    norm_domain = ""
+    if domain is not None:
+        if hasattr(domain, "value"):
+            norm_domain = str(domain.value).lower().strip()
+        else:
+            norm_domain = str(domain).lower().strip()
+            if "." in norm_domain:
+                norm_domain = norm_domain.split(".")[-1]
+
+    # Explicit speed/summarisation domain request
+    if norm_domain in ("fast", "speed", "quick", "summary", "summarize"):
+        return ModelCapability.FAST
+
+    # Constraints flags
+    if constraints:
+        if constraints.get("fast") is True or str(constraints.get("speed", "")).lower() in ("fast", "quick", "high"):
+            return ModelCapability.FAST
+        if constraints.get("prefer") == "latency" or str(constraints.get("latency", "")).lower() == "fast":
+            return ModelCapability.FAST
+        if constraints.get("summarize") or constraints.get("summary"):
+            return ModelCapability.FAST
+
+    # Extras flags
+    if extras:
+        if extras.get("fast") is True or str(extras.get("speed", "")).lower() in ("fast", "quick"):
+            return ModelCapability.FAST
+        if extras.get("prefer") == "latency" or str(extras.get("latency", "")).lower() == "fast":
+            return ModelCapability.FAST
+        if str(extras.get("capability", "")).lower() == "fast":
+            return ModelCapability.FAST
+
+    # Goal keywords
+    if goal:
+        words = set(re.findall(r"\b[a-zA-Z]+\b", goal.lower()))
+        if bool(words & SPEED_KEYWORDS):
+            return ModelCapability.FAST
+
+    if norm_domain in DOMAIN_CAPABILITY_MAP:
+        return DOMAIN_CAPABILITY_MAP[norm_domain]
+
+    return ModelCapability.REASONING
 
 
 class RoutingError(ValueError):
@@ -129,7 +263,9 @@ class ModelRouter:
         try:
             return self.select(request), False
         except RoutingError as exc:
-            logging.getLogger(__name__).warning(
+            lg = logging.getLogger(__name__)
+            lg.disabled = False
+            lg.warning(
                 "ModelRouter cannot satisfy capability %r: %s; explicitly falling back to %r",
                 getattr(request.capability, "value", request.capability),
                 exc,
@@ -144,6 +280,33 @@ class ModelRouter:
                 policy_applied=policy,
             )
             return decision, True
+
+    def select_or_fallback_for_domain(
+        self,
+        domain: Any = None,
+        goal: str | None = None,
+        *,
+        fallback_model: str | None = None,
+        task: Any = None,
+        constraints: dict[str, Any] | None = None,
+        extras: dict[str, Any] | None = None,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> tuple[RoutingDecision, bool]:
+        """Pick the best model for a domain/goal or fall back explicitly."""
+        cap = capability_for(
+            domain,
+            goal,
+            task=task,
+            constraints=constraints,
+            extras=extras,
+        )
+        req_kwargs: dict[str, Any] = {"capability": cap}
+        if request_overrides:
+            req_kwargs.update(request_overrides)
+        return self.select_or_fallback(
+            RoutingRequest(**req_kwargs),
+            fallback_model=fallback_model,
+        )
 
     def record_usage(self, model_id: str, usage: TokenUsage) -> None:
         """Feed one call's :class:`TokenUsage` into the router's tracker."""

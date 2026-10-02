@@ -150,27 +150,32 @@ class PlatformNodeRuntime:
                 f"{type(self.pipeline).__name__}"
             )
 
-        # Seed the question from graph input on the first node. The pipeline
-        # reads it via `_question_from(state)`, which looks at
-        # state.data["task"]["goal"] / ["input"]["question"] — so seed exactly
-        # that shape (a bare "question" key would be ignored).
+        # Seed the question or task data from graph input on the first node.
+        if "task" not in self._pipeline_data and self.task is not None:
+            self._pipeline_data["task"] = self.task.model_dump()
         if pipeline_node == "question_analysis":
             text = _collect_text(inputs).strip()
-            if text and "task" not in self._pipeline_data:
-                goal = self.task.goal if self.task is not None else text
-                self._pipeline_data["task"] = {
-                    "goal": goal,
-                    "input": {"question": text, "raw": text},
-                }
+            if text:
+                if "task" not in self._pipeline_data:
+                    goal = self.task.goal if self.task is not None else text
+                    self._pipeline_data["task"] = {
+                        "goal": goal,
+                        "input": {"question": text, "raw": text},
+                    }
+                else:
+                    self._pipeline_data["task"].setdefault("input", {})["question"] = text
+        elif pipeline_node == "scope_validation":
+            if self.task is not None:
+                self._pipeline_data["task"] = self.task.model_dump()
         if "task_id" not in self._pipeline_data and self.task is not None:
             self._pipeline_data["task_id"] = self.task.task_id
 
+        workflow_name = getattr(self.pipeline, "workflow_name", getattr(self.pipeline, "name", "research"))
         state = WorkflowState(
             task_id=str(self._pipeline_data.get("task_id", "")),
-            workflow="research",
+            workflow=str(workflow_name),
             data=dict(self._pipeline_data),
         )
-
         is_agent_ish = (
             pipeline_node in ("question_analysis", "research_planning", "synthesis")
             or node.kind in (NodeKind.AGENT, NodeKind.SYNTHESIS)
@@ -583,3 +588,11 @@ class PlatformNodeRuntime:
                 "dropped_count": ctx.extras.get("dropped_count", 0),
             },
         }
+
+    @property
+    def pipeline_artifacts(self) -> list[Any]:
+        """Artifacts emitted by pipeline nodes into state_updates['artifacts']."""
+        raw = self._pipeline_data.get("artifacts") or []
+        from uap.contracts.models import Artifact
+
+        return [a for a in raw if isinstance(a, Artifact)]

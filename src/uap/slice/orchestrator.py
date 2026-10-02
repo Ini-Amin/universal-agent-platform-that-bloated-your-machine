@@ -55,16 +55,33 @@ from uap.workspace.model import Workspace
 from .evaluation_gate import SliceEvaluator
 from .runtime_adapter import PlatformNodeRuntime
 from uap.observability.errors import log_swallowed_exception
+from uap.models.router import capability_for
+from uap.workflows.scope import ScopeGate, ScopeRuleError
 
-__all__ = ["PlatformSlice", "SliceResult"]
+__all__ = [
+    "PlatformSlice",
+    "SliceResult",
+    "build_research_graph",
+    "build_bbp_graph",
+    "scope_gate_for",
+    "capability_for",
+]
 
 logger = logging.getLogger(__name__)
 _WORKFLOW_NAME = "research-slice"
 _WORKFLOW_VERSION = 1
 _WORKFLOW_REF = f"{_WORKFLOW_NAME}@v{_WORKFLOW_VERSION}"
 
+_BBP_WORKFLOW_NAME = "bbp-slice"
+_BBP_WORKFLOW_VERSION = 1
+_BBP_WORKFLOW_REF = f"{_BBP_WORKFLOW_NAME}@v{_BBP_WORKFLOW_VERSION}"
 
-def _llm_synthesizer(client: Any, router: Any | None = None) -> Any:
+def _llm_synthesizer(
+    client: Any,
+    router: Any | None = None,
+    domain: Any | None = None,
+    goal: str | None = None,
+) -> Any:
     """Build the async ``(question, verified) -> analysis`` callable the
     research pipeline's synthesis node appends to the report.
 
@@ -89,11 +106,19 @@ def _llm_synthesizer(client: Any, router: Any | None = None) -> Any:
         user_parts.append(f"Verified claims:\n{claims}")
         model_id = os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol")
         if router is not None:
-            from uap.models.catalog import ModelCapability
             from uap.models.router import RoutingRequest
 
+            ctx_task = getattr(context, "task", None) if context is not None else None
+            effective_domain = getattr(ctx_task, "domain", None) or domain or "research"
+            effective_goal = getattr(ctx_task, "goal", None) or goal or question
+            effective_constraints = getattr(ctx_task, "constraints", None)
+            capability = capability_for(
+                effective_domain,
+                effective_goal,
+                constraints=effective_constraints,
+            )
             decision, _is_fb = router.select_or_fallback(
-                RoutingRequest(capability=ModelCapability.REASONING)
+                RoutingRequest(capability=capability)
             )
             model_id = decision.model_id
             last_decision.append(decision)
@@ -146,6 +171,7 @@ class SliceResult(BaseModel):
     traces_recorded: int = 0
     context: dict[str, Any] | None = None
     error: str | None = None
+    output: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +287,139 @@ def build_research_graph() -> WorkflowGraph:
         nodes=nodes,
         edges=edges,
     )
+
+
+def build_bbp_graph() -> WorkflowGraph:
+    """The canonical BBP slice graph — the REAL 8-node pipeline.
+
+    INPUT -> scope_validation -> recon_planning -> asset_discovery
+          -> endpoint_discovery -> finding_generation -> finding_classification
+          -> validation -> report -> OUTPUT
+    """
+    nodes = [
+        GraphNode(id="input", kind=NodeKind.INPUT, outputs=[_port()]),
+        GraphNode(
+            id="scope_validation",
+            kind=NodeKind.EVALUATION,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "scope_validation"},
+        ),
+        GraphNode(
+            id="recon_planning",
+            kind=NodeKind.AGENT,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "recon_planning"},
+        ),
+        GraphNode(
+            id="asset_discovery",
+            kind=NodeKind.TOOL,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "asset_discovery"},
+        ),
+        GraphNode(
+            id="endpoint_discovery",
+            kind=NodeKind.TOOL,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "endpoint_discovery"},
+        ),
+        GraphNode(
+            id="finding_generation",
+            kind=NodeKind.AGENT,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "finding_generation"},
+        ),
+        GraphNode(
+            id="finding_classification",
+            kind=NodeKind.AGENT,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "finding_classification"},
+        ),
+        GraphNode(
+            id="validation",
+            kind=NodeKind.EVALUATION,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "validation"},
+        ),
+        GraphNode(
+            id="report",
+            kind=NodeKind.SYNTHESIS,
+            inputs=[_port()],
+            outputs=[_port()],
+            config={"pipeline_node": "report"},
+        ),
+        GraphNode(id="output", kind=NodeKind.OUTPUT, inputs=[_port()], outputs=[_port()]),
+    ]
+    chain = [
+        "input",
+        "scope_validation",
+        "recon_planning",
+        "asset_discovery",
+        "endpoint_discovery",
+        "finding_generation",
+        "finding_classification",
+        "validation",
+        "report",
+        "output",
+    ]
+    edges = [
+        GraphEdge(
+            id=f"e{i}",
+            source=src,
+            source_port="value",
+            target=dst,
+            target_port="value",
+            kind=EdgeKind.DATA,
+        )
+        for i, (src, dst) in enumerate(zip(chain, chain[1:]), start=1)
+    ]
+    return WorkflowGraph(
+        id=_BBP_WORKFLOW_NAME,
+        name=_BBP_WORKFLOW_NAME,
+        description="§71 vertical-slice bbp workflow (real BBP pipeline).",
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def scope_gate_for(spec: TaskSpec) -> ScopeGate:
+    """Build the per-task BBP scope gate from the compiled ``TaskSpec``."""
+    constraints = spec.constraints or {}
+    in_scope = constraints.get("in_scope")
+    if in_scope:
+        return ScopeGate(
+            in_scope=list(in_scope),
+            out_of_scope=list(constraints.get("out_of_scope") or []),
+        )
+    targets = (spec.input or {}).get("targets")
+    if targets:
+        if isinstance(targets, (list, tuple)):
+            in_scope = [str(item) for item in targets]
+        else:
+            in_scope = [str(targets)]
+        return ScopeGate(
+            in_scope=in_scope,
+            out_of_scope=list(constraints.get("out_of_scope") or []),
+        )
+    return ScopeGate(in_scope=[], out_of_scope=[])
+
+
+def _targets_from_spec(spec: TaskSpec) -> list[str]:
+    data = spec.model_dump()
+    for container in (data.get("input") or {}, data.get("constraints") or {}):
+        value = container.get("targets")
+        if value:
+            return [str(item) for item in value] if isinstance(value, (list, tuple)) else [str(value)]
+    goal = str(data.get("goal") or "").strip()
+    if goal:
+        return [goal]
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -401,8 +560,33 @@ class PlatformSlice:
         self._graphs[_WORKFLOW_NAME] = graph
         return _WORKFLOW_REF
 
-    def _resolve_or_register_workflow(self) -> tuple[str, bool]:
-        """Reuse an existing ``research-slice`` workflow or register a new one."""
+    def register_bbp_workflow(self) -> str:
+        """Register the canonical BBP workflow in the Library; return its ref."""
+        graph = build_bbp_graph()
+        if self._session_factory is not None:
+            from uap.db.engine import session_scope
+            from uap.library.service import DuplicateDefinitionError
+
+            try:
+                with session_scope(self._session_factory) as session:
+                    LibraryService(session=session).register_workflow(
+                        _BBP_WORKFLOW_NAME,
+                        {"graph_ref": f"graphs/{_BBP_WORKFLOW_NAME}.v{_BBP_WORKFLOW_VERSION}.json"},
+                        tags=["slice", "bbp"],
+                    )
+            except DuplicateDefinitionError:
+                pass
+        self._graphs[_BBP_WORKFLOW_REF] = graph
+        self._graphs[_BBP_WORKFLOW_NAME] = graph
+        return _BBP_WORKFLOW_REF
+
+    def _resolve_or_register_workflow(self, domain: str = "research") -> tuple[str, bool]:
+        """Reuse an existing workflow or register a new one."""
+        target_name = _BBP_WORKFLOW_NAME if domain == "bbp" else _WORKFLOW_NAME
+        target_ref = _BBP_WORKFLOW_REF if domain == "bbp" else _WORKFLOW_REF
+        graph_builder = build_bbp_graph if domain == "bbp" else build_research_graph
+        register_fn = self.register_bbp_workflow if domain == "bbp" else self.register_research_workflow
+
         if self._session_factory is not None:
             from uap.db.engine import session_scope
 
@@ -422,15 +606,15 @@ class PlatformSlice:
                 )
                 existing = []
             for name, ref in existing:
-                if "research-slice" in name:
+                if target_name in name:
                     if ref not in self._graphs:
                         # The Library stores a graph_ref, not the graph; rebuild
                         # the canonical graph so execution has something to run.
-                        graph = build_research_graph()
+                        graph = graph_builder()
                         self._graphs[ref] = graph
                         self._graphs[name] = graph
                     return ref, True
-        return self.register_research_workflow(), False
+        return register_fn(), False
 
     def _resolve_graph(self, ref: str) -> WorkflowGraph:
         if ref in self._graphs:
@@ -440,7 +624,10 @@ class PlatformSlice:
             return self._graphs[name]
         # Last-resort fallback: the canonical graph, so a run is never blocked by
         # a Library/graph lookup miss.
-        graph = build_research_graph()
+        if "bbp" in ref:
+            graph = build_bbp_graph()
+        else:
+            graph = build_research_graph()
         self._graphs[ref] = graph
         return graph
 
@@ -450,11 +637,14 @@ class PlatformSlice:
 
     def run(
         self,
-        raw_input: str,
+        raw_input: str | TaskSpec,
         *,
         user_id: str | None = None,
         task_id: str | None = None,
         workspace_id: str | None = None,
+        scope_gate: Any | None = None,
+        pipeline: Any | None = None,
+        task: TaskSpec | None = None,
     ) -> SliceResult:
         """Execute the full slice for ``raw_input``; never raises.
 
@@ -468,31 +658,101 @@ class PlatformSlice:
                 user_id=user_id,
                 task_id=task_id,
                 workspace_id=workspace_id,
+                scope_gate=scope_gate,
+                pipeline=pipeline,
+                task=task,
             )
         )
 
     async def _run(
         self,
-        raw_input: str,
+        raw_input: str | TaskSpec,
         *,
         user_id: str | None = None,
         task_id: str | None = None,
         workspace_id: str | None = None,
+        scope_gate: Any | None = None,
+        pipeline: Any | None = None,
+        task: TaskSpec | None = None,
     ) -> SliceResult:
         out = SliceResult()
 
         # 1. Entry Workflow -> TaskSpec (or clarification).
-        outcome = self.entry.run(UserRequest(raw_input=raw_input, user_id=user_id))
-        if outcome.needs_clarification or outcome.spec is None:
-            out.error = f"clarification required: {outcome.question or 'intent unclear'}"
-            return out
-        task = outcome.spec
+        if task is None:
+            if isinstance(raw_input, TaskSpec):
+                task = raw_input
+            else:
+                outcome = self.entry.run(UserRequest(raw_input=raw_input, user_id=user_id))
+                if outcome.needs_clarification or outcome.spec is None:
+                    out.execution_status = "failed"
+                    out.error = f"clarification required: {outcome.question or 'intent unclear'}"
+                    return out
+                task = outcome.spec
         if task_id:
             # Pin the caller's id so durable records match what the client has.
             task = task.model_copy(update={"task_id": task_id})
         out.task_id = task.task_id
 
-        # 2. Workspace detection (never silently switch).
+        # 1b. Determine pipeline & domain (Research vs BBP).
+        active_pipeline = pipeline if pipeline is not None else self.pipeline
+        if active_pipeline is not None and getattr(active_pipeline, "synthesizer", None) is not None:
+            cur_synth = active_pipeline.synthesizer
+            if getattr(cur_synth, "_context_wrapped", False) and hasattr(cur_synth, "__closure__") and cur_synth.__closure__:
+                for cell in cur_synth.__closure__:
+                    if callable(cell.cell_contents) and hasattr(cell.cell_contents, "last_decision"):
+                        active_pipeline.synthesizer = cell.cell_contents
+                        break
+        from uap.workflows.bbp import BBPWorkflow
+
+        is_bbp = (
+            str(task.domain) == "bbp"
+            or isinstance(active_pipeline, BBPWorkflow)
+            or scope_gate is not None
+        )
+
+        # 1c. SCOPE GATE ENFORCEMENT (Security boundary - must be evaluated BEFORE any node runs).
+        if is_bbp:
+            gate = scope_gate
+            if gate is None and active_pipeline is not None:
+                gate = getattr(active_pipeline, "scope_gate", None)
+            if gate is None:
+                try:
+                    gate = scope_gate_for(task)
+                except Exception as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "scope gate evaluation failed",
+                        level=logging.WARNING,
+                    )
+                    out.execution_status = "failed"
+                    out.error = f"scope gate evaluation failed: {exc}"
+                    return out
+            if gate is None:
+                out.execution_status = "failed"
+                out.error = "no scope gate configured: refusing to run"
+                return out
+
+            targets = _targets_from_spec(task)
+            allowed, blocked = gate.filter(targets)
+            if not allowed:
+                blocked_targets = gate.blocked_reasons(blocked)
+                notes = (
+                    f"blocked: no in-scope targets remain ({len(blocked_targets)} "
+                    f"target(s) excluded)"
+                )
+                out.execution_status = "failed"
+                out.error = notes
+                return out
+
+            if active_pipeline is None or not isinstance(active_pipeline, BBPWorkflow):
+                active_pipeline = BBPWorkflow(scope_gate=gate, tools=self.tools)
+            else:
+                if getattr(active_pipeline, "scope_gate", None) is None:
+                    active_pipeline.scope_gate = gate
+                if getattr(active_pipeline, "tools", None) is None:
+                    active_pipeline.tools = self.tools
+
         # 2. Workspace: an explicit client choice wins; otherwise detect.
         if workspace_id:
             workspace = next(
@@ -509,8 +769,9 @@ class PlatformSlice:
         out.workspace_reason = reason
 
         # 3. Workflow: reuse or register.
+        domain_name = "bbp" if is_bbp else "research"
         try:
-            ref, was_existing = self._resolve_or_register_workflow()
+            ref, was_existing = self._resolve_or_register_workflow(domain=domain_name)
         except Exception as exc:  # keep going on a canonical fallback
             log_swallowed_exception(
                 logger,
@@ -518,18 +779,23 @@ class PlatformSlice:
                 "workflow registration failed; using fallback",
                 level=logging.WARNING,
             )
-            ref, was_existing = _WORKFLOW_REF, False
-            self._graphs[ref] = build_research_graph()
+            ref, was_existing = (_BBP_WORKFLOW_REF if is_bbp else _WORKFLOW_REF), False
+            self._graphs[ref] = build_bbp_graph() if is_bbp else build_research_graph()
             out.error = f"workflow registration failed, using fallback: {exc!r}"
         out.workflow_ref = ref
         out.workflow_was_existing = was_existing
 
         # 4-5. Durable execution via ExecutionService + Worker.
+        tools = (
+            active_pipeline.tools
+            if (is_bbp and getattr(active_pipeline, "tools", None) is not None)
+            else self.tools
+        )
         runtime = PlatformNodeRuntime(
             self.agents,
-            self.tools,
+            tools,
             task=task,
-            pipeline=self.pipeline,
+            pipeline=active_pipeline,
             session_factory=self._session_factory,
         )
         service = ExecutionService(
@@ -590,7 +856,7 @@ class PlatformSlice:
                 )
             )
             traces += 1
-            if str(task.domain) == "bbp":
+            if str(task.domain) == "bbp" or is_bbp:
                 recorder.record(
                     DecisionTrace(
                         execution_id=execution_id,
@@ -603,29 +869,48 @@ class PlatformSlice:
                 traces += 1
 
             # Model routing decision trace
+            task_capability = capability_for(
+                task.domain,
+                task.goal,
+                constraints=task.constraints,
+            )
             model_decision = None
-            synth = getattr(self.pipeline, "synthesizer", None)
-            if synth is not None and getattr(synth, "last_decision", None):
-                model_decision = synth.last_decision[-1]
+            is_fb = False
+            synth = getattr(active_pipeline, "synthesizer", None)
+            if synth is not None:
+                if getattr(synth, "last_decision", None):
+                    model_decision = synth.last_decision[-1]
+                elif hasattr(synth, "__closure__") and synth.__closure__:
+                    for cell in synth.__closure__:
+                        target = cell.cell_contents
+                        if hasattr(target, "last_decision") and target.last_decision:
+                            model_decision = target.last_decision[-1]
+                            break
             if model_decision is None:
                 llm_agent = self.agents.get("llm")
                 if llm_agent is not None and getattr(llm_agent, "last_decision", None):
                     model_decision = llm_agent.last_decision
             if model_decision is None and self._model_router is not None:
-                from uap.models.catalog import ModelCapability
                 from uap.models.router import RoutingRequest
 
-                model_decision, _ = self._model_router.select_or_fallback(
-                    RoutingRequest(capability=ModelCapability.REASONING)
+                model_decision, is_fb = self._model_router.select_or_fallback(
+                    RoutingRequest(capability=task_capability)
                 )
+            elif model_decision is not None:
+                is_fb = "explicit fallback to" in getattr(model_decision, "reason", "")
 
             if model_decision is not None:
                 from uap.trace.model import DecisionAlternative
 
+                cap_str = (
+                    task_capability.value
+                    if hasattr(task_capability, "value")
+                    else str(task_capability)
+                )
                 recorder.record(
                     DecisionTrace(
                         execution_id=execution_id,
-                        node_id="synthesis",
+                        node_id="synthesis" if not is_bbp else "report",
                         decision_type=DecisionType.MODEL_SELECTION,
                         chosen=model_decision.model_id,
                         rationale=model_decision.reason,
@@ -636,8 +921,11 @@ class PlatformSlice:
                             )
                             for fb in model_decision.fallbacks
                         ],
-                        confidence=1.0,
-                        inputs_summary={"capability": "reasoning"},
+                        confidence=0.0 if is_fb else 1.0,
+                        inputs_summary={
+                            "capability": cap_str,
+                            "fallback": is_fb,
+                        },
                     )
                 )
                 traces += 1
@@ -654,36 +942,70 @@ class PlatformSlice:
         out.context = runtime.get_inspectable_context()
         # 7. Artifacts: any node output carrying "content".
         saved: list[Artifact] = []
-        for node_id, ports in node_results.items():
-            if not isinstance(ports, dict):
-                continue
-            for value in ports.values():
-                if not (isinstance(value, dict) and value.get("content")):
+        if not is_bbp:
+            for node_id, ports in node_results.items():
+                if not isinstance(ports, dict):
                     continue
-                content = value["content"]
-                if not isinstance(content, str):
-                    content = str(content)
-                artifact = Artifact(
-                    task_id=task.task_id,
-                    type=f"slice-{node_id}",
-                    source=node_id,
-                    status=ArtifactStatus.FINAL,
-                )
+                for value in ports.values():
+                    if not (isinstance(value, dict) and value.get("content")):
+                        continue
+                    content = value["content"]
+                    if not isinstance(content, str):
+                        content = str(content)
+                    artifact = Artifact(
+                        task_id=task.task_id,
+                        type=f"slice-{node_id}",
+                        source=node_id,
+                        status=ArtifactStatus.FINAL,
+                    )
+                    try:
+                        stored = self.artifacts.save(artifact, content)
+                        saved.append(stored)
+                        out.artifacts.append(stored.artifact_id)
+                    except Exception as exc:
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            "slice artifact save failed",
+                            level=logging.WARNING,
+                            task_id=task.task_id,
+                            node=node_id,
+                        )
+                        out.error = (out.error + " | " if out.error else "") + f"artifact save failed: {exc!r}"
+                    break  # one artifact per node is enough
+
+        for art in runtime.pipeline_artifacts:
+            if art.content_ref:
                 try:
-                    stored = self.artifacts.save(artifact, content)
+                    stored = self.artifacts.save(art, art.content_ref)
                     saved.append(stored)
                     out.artifacts.append(stored.artifact_id)
                 except Exception as exc:
                     log_swallowed_exception(
                         logger,
                         exc,
-                        "slice artifact save failed",
+                        "slice pipeline artifact save failed",
                         level=logging.WARNING,
                         task_id=task.task_id,
-                        node=node_id,
+                        type=art.type,
                     )
-                    out.error = (out.error + " | " if out.error else "") + f"artifact save failed: {exc!r}"
-                break  # one artifact per node is enough
+                    out.error = (out.error + " | " if out.error else "") + f"pipeline artifact save failed: {exc!r}"
+
+        # Surface final output text
+        if "report" in node_results:
+            rep_node = node_results["report"]
+            if isinstance(rep_node, dict):
+                for val in rep_node.values():
+                    if isinstance(val, dict) and val.get("content"):
+                        out.output = str(val["content"])
+                        break
+        elif "synthesis" in node_results:
+            syn_node = node_results["synthesis"]
+            if isinstance(syn_node, dict):
+                for val in syn_node.values():
+                    if isinstance(val, dict) and val.get("content"):
+                        out.output = str(val["content"])
+                        break
 
         # 8. Knowledge: propose -> verify -> promote (best-effort).
         # The real research pipeline produces verified claims in its
@@ -720,6 +1042,16 @@ class PlatformSlice:
                             break
                 if statement:
                     break
+        if statement is None and is_bbp:
+            validated = runtime._pipeline_data.get("validated_findings") or []
+            if validated:
+                first = validated[0]
+                t = first.get("target", "")
+                title = first.get("title", "")
+                statement = f"BBP finding on {t}: {title}" if t else str(title)
+            else:
+                statement = f"BBP security assessment completed for {task.goal}"
+
         if statement and saved:
             try:
                 session = self._session_factory()
@@ -789,10 +1121,12 @@ class PlatformSlice:
             try:
                 from uap.gitx.sync import DefinitionGitSync
 
+                workflow_name = _BBP_WORKFLOW_NAME if is_bbp else _WORKFLOW_NAME
+                workflow_version = _BBP_WORKFLOW_VERSION if is_bbp else _WORKFLOW_VERSION
                 sync = DefinitionGitSync(self.git_repo, self.git_definitions_root)
-                sync.export_graph(_WORKFLOW_NAME, _WORKFLOW_VERSION, self._resolve_graph(ref))
+                sync.export_graph(workflow_name, workflow_version, self._resolve_graph(ref))
                 out.git_commit = sync.commit_definition(
-                    "workflow", _WORKFLOW_NAME, _WORKFLOW_VERSION
+                    "workflow", workflow_name, workflow_version
                 )
             except Exception as exc:
                 log_swallowed_exception(

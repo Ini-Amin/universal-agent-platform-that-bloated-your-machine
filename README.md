@@ -37,7 +37,81 @@ cd universal-agent-platform-that-bloated-your-machine
 
 ---
 
+## Run the whole stack with Docker (recommended)
+
+One paste starts PostgreSQL (with pgvector), runs the migrations, and serves the
+UI + API on **http://127.0.0.1:8000**:
+
+```bash
+docker compose up -d --build
+```
+
+✅ **You should see:** containers `uap-db-1` and `uap-app-1` start. Open
+**http://127.0.0.1:8000** — the Visual Canvas IDE. You're done; Steps 2–5 below
+are the no-Docker path.
+
+Runs, artifacts, and event logs live in the `uap-artifacts` volume, so tasks
+survive `docker compose down && docker compose up`.
+
+**Auth is off by default in the container too.** To require a bearer token,
+export `UAP_API_TOKEN` before starting (compose passes it through; unset or
+empty = no auth, the local-first default):
+
+```bash
+export UAP_API_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') && docker compose up -d --build
+```
+
+Then open the UI once as `http://127.0.0.1:8000/?token=$UAP_API_TOKEN` — see
+[Authentication](#authentication-optional-off-by-default). The published port is
+bound to `127.0.0.1`, not `0.0.0.0`.
+
+Tear everything down:
+
+```bash
+docker compose down
+```
+
+(add `-v` to also delete the PostgreSQL data and the artifacts volume.)
+
+### No compose? Run the two containers explicitly
+
+Same stack, manual container runs — verified on a machine where
+`podman compose` is unavailable (swap `podman` for `docker` if that's what you
+have):
+
+```bash
+podman network create uap-net
+```
+
+```bash
+podman run -d --name uap-pg --network uap-net -e POSTGRES_USER=uap -e POSTGRES_PASSWORD=uap_local_dev -e POSTGRES_DB=uap -v uap-pgdata:/var/lib/postgresql/data pgvector/pgvector:pg17
+```
+
+```bash
+podman build --format docker -f Containerfile -t uap:latest .
+```
+
+```bash
+podman run -d --name uap-app --network uap-net -p 127.0.0.1:8000:8000 -e DATABASE_URL=postgresql+psycopg://uap:uap_local_dev@uap-pg:5432/uap -v uap-artifacts:/app/data/runs uap:latest
+```
+
+The app image applies migrations itself (its entrypoint retries while PostgreSQL
+boots), so there is no extra step. `--format docker` keeps the image HEALTHCHECK
+— podman drops it from the default OCI format; `docker build` needs no flag.
+
+Tear down:
+
+```bash
+podman rm -f uap-app uap-pg && podman network rm uap-net
+```
+
+(add `podman volume rm uap-pgdata uap-artifacts` to also delete the data.)
+
+---
+
 ## Step 2 — Start the database
+
+*(Skip Steps 2–5 if you ran the Docker stack above.)*
 
 Pick **one** of 2A (Docker, recommended) or 2B (native PostgreSQL).
 
@@ -55,6 +129,14 @@ docker exec uap-pg psql -U uap -d uap -c 'CREATE DATABASE uap_test OWNER uap;'
 
 ✅ **You should see:** `CREATE DATABASE`
 
+Drop the superuser flag the image gives `POSTGRES_USER` (the app must not run
+as superuser; `pgvector/pgvector` already ships the `vector` extension, so no
+further superuser step is needed):
+
+```bash
+docker exec uap-pg psql -U uap -d uap -c 'ALTER ROLE uap NOSUPERUSER NOCREATEDB;'
+```
+
 > Docker not running? Start Docker Desktop first. Port 5432 already used? You have another
 > PostgreSQL running — either stop it, or use Step 2B with your existing server.
 
@@ -71,7 +153,7 @@ brew services start postgresql@17
 ```
 
 ```bash
-createuser -s uap && createdb -O uap uap && createdb -O uap uap_test
+createuser uap && createdb -O uap uap && createdb -O uap uap_test
 ```
 
 #### Ubuntu / Debian
@@ -81,7 +163,7 @@ sudo apt install -y postgresql-17 postgresql-17-pgvector
 ```
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev' SUPERUSER;" -c "CREATE DATABASE uap OWNER uap;" -c "CREATE DATABASE uap_test OWNER uap;"
+sudo -u postgres psql -c "CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev';" -c "CREATE DATABASE uap OWNER uap;" -c "CREATE DATABASE uap_test OWNER uap;"
 ```
 
 #### Fedora / RHEL
@@ -95,7 +177,7 @@ sudo postgresql-setup --initdb && sudo systemctl enable --now postgresql
 ```
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev' SUPERUSER;" -c "CREATE DATABASE uap OWNER uap;" -c "CREATE DATABASE uap_test OWNER uap;"
+sudo -u postgres psql -c "CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev';" -c "CREATE DATABASE uap OWNER uap;" -c "CREATE DATABASE uap_test OWNER uap;"
 ```
 
 #### Windows
@@ -105,12 +187,42 @@ Easiest: use Docker (Step 2A). Or install PostgreSQL 17 from
 then in pgAdmin or psql run:
 
 ```sql
-CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev' SUPERUSER;
+CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev';
 CREATE DATABASE uap OWNER uap;
 CREATE DATABASE uap_test OWNER uap;
 ```
 
-> The `uap` role needs `SUPERUSER` so it can run `CREATE EXTENSION vector` during setup.
+> The `uap` role is intentionally **not** a superuser: owning the databases
+> already lets it create the app's tables, indexes, sequences, types and
+> extension (once installed) via the `public` schema. The only superuser step
+> left is the one-time pgvector install in Step 2C below.
+
+### Step 2C — One-time pgvector install (needs superuser, once per database)
+
+pgvector is a *non-trusted* PostgreSQL extension, so installing it requires a
+superuser — rights the `uap` role deliberately does not have. Install it once,
+per database, as your PostgreSQL superuser (Docker users: already installed by
+the `pgvector/pgvector` image — skip this step):
+
+```bash
+sudo -u postgres psql -d uap -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+sudo -u postgres psql -d uap_test -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+macOS (Homebrew's superuser is your OS user — no `sudo -u postgres`):
+
+```bash
+psql -d uap -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+psql -d uap_test -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+Windows: run the same two commands in pgAdmin (or `psql -U postgres`) against
+both databases.
+
+From now on `alembic upgrade head` (Step 4) works entirely as the
+non-superuser `uap` role. If you ever see
+``permission denied to create extension "vector"``, the extension was not
+installed — re-run the two commands above.
 
 ---
 
@@ -303,9 +415,11 @@ To enable real web research, configure search and fetch capabilities in one of t
 | `connection refused` on port 5432 | Database not running — redo Step 2A (start Docker container: `docker start uap-pg`) or 2B |
 | Tests mostly skipped | PostgreSQL unreachable — that's the skip-guard working; fix the DB first |
 | `alembic: command not found` | The venv isn't active — redo Step 3's activate command |
-| `permission denied to create extension "vector"` | The `uap` role lacks SUPERUSER — re-run the `CREATE ROLE` line from Step 2B |
+| `permission denied to create extension "vector"` | The `vector` extension was never installed (pgvector needs a superuser once). Run Step 2C: `sudo -u postgres psql -d <db> -c 'CREATE EXTENSION IF NOT EXISTS vector;'` for both databases, then re-run `alembic upgrade head` |
 | `port 8000 already in use` | Another app has it — run with `--port 8001` instead |
 | Docker: `port is already allocated` | A local PostgreSQL is already on 5432 — stop it, or use Step 2B with it |
+| App container exits with `uap: PostgreSQL not reachable` | The `db` service never came up — `docker compose logs db`. The entrypoint retries ~30s first, so a slow disk can also trip this |
+| podman: image HEALTHCHECK is ignored | podman drops HEALTHCHECK in the default OCI format — build with `podman build --format docker` (see above) |
 | `ModuleNotFoundError: No module named 'uap'` | You're in the wrong folder, or venv not active — `cd` into the repo, re-activate |
 | `DuplicateColumn: column "locked_by" ... already exists` during `alembic upgrade head` | Your `uap_test` DB drifted (older test versions ran `create_all` on the public schema). Reset it — see below |
 
@@ -316,6 +430,13 @@ bookkeeping. The clean reset (safe — it only touches `uap_test`):
 
 ```bash
 psql -h 127.0.0.1 -U uap -d uap -c "DROP DATABASE IF EXISTS uap_test;" -c "CREATE DATABASE uap_test OWNER uap;"
+```
+
+The fresh database has no `vector` extension yet — install it once as superuser
+(pgvector is not trusted; `uap` must not be superuser):
+
+```bash
+sudo -u postgres psql -d uap_test -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 ```
 
 ```bash
@@ -336,6 +457,8 @@ DATABASE_URL=postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap_test alem
 | Run server | `uvicorn uap.server.app:create_app --factory --host 127.0.0.1 --port 8000` |
 | Start Docker database later | `docker start uap-pg` |
 | Stop Docker database | `docker stop uap-pg` |
+| Run the full stack (app + DB) | `docker compose up -d --build` |
+| Stop the full stack | `docker compose down` (add `-v` to delete data + artifacts) |
 
 ---
 

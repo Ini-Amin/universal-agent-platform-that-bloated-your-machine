@@ -1,0 +1,14 @@
+# Keep the build context to what the image needs: host venvs, caches, tests,
+# docs, and prior run artifacts are regenerable or host-only.
+.git/
+.github/
+.claude/
+.pytest_cache/
+.venv/
+.venv*/
+data/
+docs/
+tests/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/

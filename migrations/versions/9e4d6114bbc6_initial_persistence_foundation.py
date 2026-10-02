@@ -24,6 +24,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from uap.db.extensions import ensure_pgvector_installed
+
 revision: str = "9e4d6114bbc6"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
@@ -31,9 +33,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # pgvector (Master sections 41, 42, 64). Idempotent; requires a role that
-    # may install extensions (owner/superuser), which is the local-first setup.
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    # pgvector (Master sections 41, 42, 64). The app role is deliberately NOT
+    # superuser, so normally a DBA pre-installs the extension once (README
+    # Step 2C). The guard is a no-op when it exists and raises an actionable
+    # error when it is missing and the role may not install it.
+    ensure_pgvector_installed(op.get_bind())
 
     op.create_table(
         "agent_definitions",

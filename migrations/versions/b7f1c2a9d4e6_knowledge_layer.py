@@ -37,6 +37,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from uap.db.extensions import ensure_pgvector_installed
+
 revision: str = "b7f1c2a9d4e6"
 down_revision: str | None = "96069bbe6bc6"
 branch_labels: str | Sequence[str] | None = None
@@ -66,9 +68,10 @@ def _in_check(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({rendered})"
 
 def upgrade() -> None:
-    # pgvector is installed by the initial migration; this is a no-op guard so
-    # the branch is self-sufficient if ever replayed in isolation.
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    # Guard only (the initial migration installs it): no-op when pgvector is
+    # present, keeps this branch replayable in isolation, and never requires
+    # the app role to be superuser (README Step 2C).
+    ensure_pgvector_installed(op.get_bind())
 
     op.create_table(
         "knowledge_items",

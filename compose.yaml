@@ -1,0 +1,56 @@
+# Universal Agent Platform — app + PostgreSQL (pgvector).
+#
+#   docker compose up -d --build      (or: podman compose up -d --build)
+#   docker compose down               (add -v to also delete the volumes)
+#
+# No compose provider (e.g. podman compose unavailable)? The equivalent explicit
+# `podman run` commands are in the README under "No compose? Run the two
+# containers explicitly".
+#
+# Auth stays opt-in: leave UAP_API_TOKEN unset (or empty) and the API is open —
+# the local-first default. To require a bearer token on every route except the
+# UI shell, export it before `up`; see the README's Authentication section.
+
+name: uap
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: uap
+      POSTGRES_PASSWORD: uap_local_dev
+      POSTGRES_DB: uap
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uap -d uap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Containerfile
+    # Already have the image? Replace the build block with:
+    #   image: uap:latest
+    environment:
+      DATABASE_URL: postgresql+psycopg://uap:uap_local_dev@db:5432/uap
+      # Empty (the default) counts as unset: API auth OFF. Generate one with:
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      UAP_API_TOKEN: ${UAP_API_TOKEN:-}
+    ports:
+      # Loopback only — widen to 0.0.0.0:8000:8000 only with UAP_API_TOKEN set
+      # (README, Authentication).
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - uap-artifacts:/app/data/runs
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uap-artifacts:

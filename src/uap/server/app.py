@@ -784,7 +784,13 @@ def create_app(
                 data={"status": record.status},
             )
 
-    async def _execute_slice(record: RunRecord, raw_input: str, user_id: str | None) -> None:
+    async def _execute_slice(
+        record: RunRecord,
+        raw_input: str,
+        user_id: str | None,
+        spec: TaskSpec | None = None,
+        workflow: Any | None = None,
+    ) -> None:
         # The SSE stream and the WS bridge both watch this bus; the slice runs
         # its own internal eventing, so mirror the task-level lifecycle here
         # (the same contract the legacy path fulfils).
@@ -798,12 +804,16 @@ def create_app(
         try:
             # Pin the id the client already received so durable records
             # (executions/events/traces) resolve under the same id.
+            gate_arg = getattr(workflow, "scope_gate", None) if workflow is not None else None
             result = await asyncio.to_thread(
                 app.state.slice.run,
                 raw_input,
                 user_id=user_id,
                 task_id=record.task_id,
                 workspace_id=record.workspace_id,
+                scope_gate=gate_arg,
+                pipeline=workflow,
+                task=spec,
             )
             if result.task_id and result.task_id != record.task_id:
                 runs[result.task_id] = record
@@ -838,7 +848,17 @@ def create_app(
                             level=logging.DEBUG,
                             meta_path=str(meta_path),
                         )
-                resolved.append({"type": str(artifact_type), "uri": str(path)})
+                target_path = artifact_dir / str(artifact_type)
+                if not target_path.exists() and path.is_file():
+                    try:
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        target_path.write_bytes(path.read_bytes())
+                    except OSError:
+                        pass
+                resolved.append({
+                    "type": str(artifact_type),
+                    "uri": str(target_path if target_path.exists() else path),
+                })
             record.artifacts = resolved
             # The run's output is the synthesis artifact's text when available
             # (that is what the user asked for); fall back to any text file.
@@ -888,11 +908,14 @@ def create_app(
                         rows = EventRepository(session).read_since(
                             uuid.UUID(str(result.execution_id)), 0
                         )
-                    record.node_history = [
+                    history = [
                         str(event.node)
                         for event in rows
                         if event.kind == "node_started" and event.node
                     ]
+                    if record.domain == Domain.BBP:
+                        history = [n for n in history if n not in ("input", "output")]
+                    record.node_history = history
                 except Exception as exc:
                     log_swallowed_exception(
                         logger,
@@ -973,23 +996,24 @@ def create_app(
         runs[spec.task_id] = record
         get_control(spec.task_id)  # register run-control gate
 
-        # The durable §71 slice now executes the REAL research pipeline (its
-        # node functions run through the canonical graph; verified equivalent
+        # The durable §71 slice executes the REAL research and BBP pipelines
+        # (their node functions run through canonical graphs; verified equivalent
         # output to the legacy runner plus PG events/traces/knowledge).
-        # BBP stays legacy: its per-request scope gate is a security boundary
-        # the slice does not yet honour.
+        # BBP scope gate is strictly evaluated BEFORE any node executes.
         use_slice = (
             getattr(app.state, "slice", None) is not None
-            and decision.domain == Domain.RESEARCH
+            and decision.domain in (Domain.RESEARCH, Domain.BBP)
         )
         if use_slice:
             if run_inline:
-                await _execute_slice(record, body.input, body.user_id)
+                await _execute_slice(record, body.input, body.user_id, spec, workflow)
             else:
                 # Hold a strong reference: the event loop only keeps a weak one,
                 # so a bare create_task() can be garbage-collected mid-run and
                 # the task would silently vanish (CPython asyncio docs).
-                task = asyncio.create_task(_execute_slice(record, body.input, body.user_id))
+                task = asyncio.create_task(
+                    _execute_slice(record, body.input, body.user_id, spec, workflow)
+                )
                 app.state.background.add(task)
                 task.add_done_callback(app.state.background.discard)
         elif run_inline:

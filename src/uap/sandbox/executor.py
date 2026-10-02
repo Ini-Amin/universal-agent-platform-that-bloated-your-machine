@@ -1,30 +1,132 @@
-"""In-process sandbox guard (Master section 30).
+"""In-process and child-process sandbox guard (Master section 30).
 
-Enforces capability-shaped limits -- filesystem paths, network hosts,
-subprocess use, output size, and a wall-clock timeout -- at the *call
-boundary*. :meth:`Sandbox.run_guarded` wraps an async callable with
-``asyncio.wait_for`` and truncates its output.
+Enforces capability-shaped limits at the call boundary and executes guarded
+callables in an isolated forked child process when supported.
 
-HONEST LIMITATION: this is an in-process guard, NOT an OS sandbox. It cannot
-stop a function that bypasses :meth:`check_path` / :meth:`check_network` and
-touches the filesystem or network directly, and the timeout cannot interrupt
-blocking (non-``await``) CPU work -- ``wait_for`` only cancels at ``await``
-points. ``max_memory_mb`` / ``max_cpu_seconds`` are declared limits a real OS
-sandbox (container isolation, section 30 phase 12) must enforce; here only the
-timeout and output size are actually imposed. Security is represented by
-explicit capability + policy enforcement (sections 29, 30, 31), not by this
-guard alone.
+ENFORCED:
+- Memory limit (:attr:`SandboxPolicy.max_memory_mb`): Enforced in a forked child
+  process via ``resource.setrlimit(resource.RLIMIT_AS, ...)`` on platforms
+  supporting fork and rlimit (e.g. Linux). Exceeding this limit triggers a
+  :class:`SandboxViolation`.
+- CPU limit (:attr:`SandboxPolicy.max_cpu_seconds`): Enforced at the OS level
+  via ``resource.RLIMIT_CPU`` in the child process (sending SIGXCPU on expiry).
+- Wall-clock timeout (:attr:`SandboxPolicy.max_cpu_seconds`): Enforced by the
+  parent process awaiting child completion; kills child process on timeout.
+- Output truncation (:attr:`SandboxPolicy.max_output_bytes`): Truncates return
+  values of type ``str`` or ``bytes`` to the byte limit.
+- Call-boundary checks: Cooperative :meth:`check_path`, :meth:`check_network`,
+  and :meth:`check_subprocess` calls before resource access.
+
+NOT ENFORCED:
+- Direct syscall / uncooperative I/O interception: Functions that bypass
+  :meth:`check_path` / :meth:`check_network` can still access host filesystem
+  and network directly (requires OS containers / seccomp / mount namespaces).
+- Sub-second CPU limit granularity: POSIX ``RLIMIT_CPU`` operates in whole
+  seconds; sub-second limits rely on the wall-clock timeout line of defence.
+- Non-picklable results: Return values must be picklable to cross the process
+  pipe boundary; unpicklable return values raise :class:`SandboxViolation`.
+- Non-fork platforms: Systems without ``fork`` or ``resource`` support degrade
+  to in-process execution without memory or OS CPU limiting (logged warning).
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
+import math
+import multiprocessing as mp
+import signal
+import warnings
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
+
 __all__ = ["SandboxPolicy", "SandboxViolation", "Sandbox"]
+
+
+def _can_fork() -> bool:
+    # ponytail: Linux fork+rlimit is primary; Windows/Wasm upgrade path requires OS container shim.
+    return (
+        hasattr(mp, "get_context")
+        and "fork" in mp.get_all_start_methods()
+        and resource is not None
+    )
+
+
+def _child_runner(
+    conn: Any,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    max_memory_mb: int,
+    max_cpu_seconds: float,
+) -> None:
+    try:
+        if resource is not None:
+            if max_memory_mb > 0 and hasattr(resource, "RLIMIT_AS"):
+                limit_bytes = int(max_memory_mb) * 1024 * 1024
+                try:
+                    resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+                except (ValueError, OSError):
+                    pass
+            if max_cpu_seconds > 0 and hasattr(resource, "RLIMIT_CPU"):
+                cpu_sec = max(1, math.ceil(max_cpu_seconds))
+                try:
+                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_sec, cpu_sec + 1))
+                except (ValueError, OSError):
+                    pass
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            res = fn(*args, **kwargs)
+            if inspect.isawaitable(res):
+                res = loop.run_until_complete(res)
+        finally:
+            loop.close()
+
+        fn_state = None
+        target_obj = getattr(fn, "__self__", fn)
+        if hasattr(target_obj, "__dict__"):
+            try:
+                fn_state = dict(target_obj.__dict__)
+            except Exception:
+                fn_state = None
+
+        try:
+            conn.send(("ok", res, fn_state))
+        except Exception:
+            try:
+                conn.send(("ok", res, None))
+            except Exception as exc:
+                conn.send(("unpicklable_result", type(exc).__name__, str(exc)))
+    except MemoryError as exc:
+        try:
+            conn.send(("memory_limit", str(exc)))
+        except Exception:
+            pass
+    except BaseException as exc:
+        try:
+            conn.send(("exception", exc))
+        except Exception:
+            try:
+                conn.send(("unpicklable_exception", type(exc).__name__, str(exc)))
+            except Exception:
+                pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 class SandboxViolation(Exception):
@@ -122,19 +224,140 @@ class Sandbox:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Run ``fn`` under the timeout; truncate output; re-raise its errors.
+        """Run ``fn`` under sandbox limits; truncate output; re-raise errors.
 
-        A timeout maps to :class:`SandboxViolation`. Other exceptions from
-        ``fn`` propagate unchanged.
+        Executes ``fn`` in a forked child process enforcing memory and CPU
+        resource limits where available. A timeout or resource violation maps to
+        :class:`SandboxViolation`. Normal exceptions from ``fn`` propagate unchanged.
         """
-        try:
-            result = await asyncio.wait_for(
-                fn(*args, **kwargs), timeout=self._policy.max_cpu_seconds
+        if not _can_fork():
+            logger.warning(
+                "Fork or resource limit not supported on this platform; "
+                "falling back to in-process execution without memory/CPU rlimit enforcement."
             )
-        except asyncio.TimeoutError as exc:
+            try:
+                target = fn(*args, **kwargs)
+                if inspect.isawaitable(target):
+                    result = await asyncio.wait_for(
+                        target, timeout=self._policy.max_cpu_seconds
+                    )
+                else:
+                    result = target
+            except asyncio.TimeoutError as exc:
+                raise SandboxViolation(
+                    f"execution exceeded {self._policy.max_cpu_seconds}s timeout"
+                ) from exc
+            if isinstance(result, (str, bytes)):
+                return self.truncate_output(result)
+            return result
+
+        ctx = mp.get_context("fork")
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        p = ctx.Process(
+            target=_child_runner,
+            args=(
+                child_conn,
+                fn,
+                args,
+                kwargs,
+                self._policy.max_memory_mb,
+                self._policy.max_cpu_seconds,
+            ),
+        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=DeprecationWarning,
+                message=".*multi-threaded.*use of fork.*",
+            )
+            p.start()
+        child_conn.close()
+
+        def _read_from_child() -> tuple[str, Any]:
+            try:
+                return ("data", parent_conn.recv())
+            except EOFError:
+                p.join()
+                return ("eof", p.exitcode)
+            finally:
+                p.join()
+
+        try:
+            read_task = asyncio.create_task(asyncio.to_thread(_read_from_child))
+            status, payload = await asyncio.wait_for(
+                asyncio.shield(read_task),
+                timeout=self._policy.max_cpu_seconds,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            p.join(timeout=0.02)
+            sigxcpu = getattr(signal, "SIGXCPU", None)
+            if sigxcpu is not None and p.exitcode == -sigxcpu:
+                if p.is_alive():
+                    p.kill()
+                try:
+                    await read_task
+                except Exception:
+                    pass
+                raise SandboxViolation(
+                    f"execution exceeded {self._policy.max_cpu_seconds}s CPU limit (SIGXCPU)"
+                ) from exc
+            if p.is_alive():
+                p.kill()
+            try:
+                await read_task
+            except Exception:
+                pass
             raise SandboxViolation(
                 f"execution exceeded {self._policy.max_cpu_seconds}s timeout"
             ) from exc
-        if isinstance(result, (str, bytes)):
-            return self.truncate_output(result)
-        return result
+        finally:
+            if p.is_alive():
+                p.kill()
+                p.join()
+            parent_conn.close()
+
+        if status == "data":
+            tag = payload[0]
+            if tag == "ok":
+                result = payload[1]
+                fn_state = payload[2] if len(payload) > 2 else None
+                if fn_state is not None:
+                    target_obj = getattr(fn, "__self__", fn)
+                    if hasattr(target_obj, "__dict__"):
+                        try:
+                            target_obj.__dict__.update(fn_state)
+                        except Exception:
+                            pass
+                if isinstance(result, (str, bytes)):
+                    return self.truncate_output(result)
+                return result
+            if tag == "memory_limit":
+                raise SandboxViolation(
+                    f"execution exceeded {self._policy.max_memory_mb}MB memory limit"
+                )
+            if tag == "exception":
+                raise payload[1]
+            if tag == "unpicklable_result":
+                raise SandboxViolation(
+                    f"guarded return value could not be serialized across process boundary: {payload[1]}: {payload[2]}"
+                )
+            if tag == "unpicklable_exception":
+                raise RuntimeError(
+                    f"guarded execution raised unpicklable error {payload[1]}: {payload[2]}"
+                )
+            raise SandboxViolation(f"unexpected child worker message: {tag}")
+
+        sigxcpu = getattr(signal, "SIGXCPU", None)
+        if sigxcpu is not None and payload == -sigxcpu:
+            raise SandboxViolation(
+                f"execution exceeded {self._policy.max_cpu_seconds}s CPU limit (SIGXCPU)"
+            )
+        if payload == -signal.SIGKILL:
+            raise SandboxViolation(
+                "execution terminated by signal SIGKILL (memory limit or external termination)"
+            )
+        if payload == 0:
+            raise SandboxViolation("child process exited without returning a result")
+        raise SandboxViolation(
+            f"child process terminated unexpectedly with exit code {payload}"
+        )
