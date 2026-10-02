@@ -86,3 +86,42 @@ def test_pooled_engine_bounds_the_local_pool() -> None:
         assert engine.pool.size() == 5
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Regression: the pool-sizing branch must not break non-QueuePool classes.
+#
+# Found by running the real fix against a real pgbouncer (transaction mode,
+# port 6543, max_prepared_statements=0) on 2026-10-03. Passing pool_size to
+# create_engine alongside NullPool raises TypeError — so the branch meant to
+# SUPPORT pooled connections crashed for anyone who chose NullPool.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "poolclass_name",
+    ["NullPool", "StaticPool"],
+)
+def test_pooler_workaround_tolerates_non_queue_pools(poolclass_name: str) -> None:
+    import sqlalchemy.pool as sa_pool
+
+    poolclass = getattr(sa_pool, poolclass_name)
+    engine = create_db_engine(
+        "postgresql+psycopg://uap:pw@db.example.com:6543/uap",
+        poolclass=poolclass,
+    )
+    try:
+        # The workaround that matters must still be applied.
+        connect_args = engine.dialect.create_connect_args(engine.url)[1]
+        assert connect_args.get("prepare_threshold") is None, connect_args
+    finally:
+        engine.dispose()
+
+
+def test_pooler_workaround_still_sizes_a_queue_pool() -> None:
+    """The sizing must not be lost while fixing the crash above."""
+    engine = create_db_engine("postgresql+psycopg://uap:pw@db.example.com:6543/uap")
+    try:
+        assert engine.pool.size() == 5
+    finally:
+        engine.dispose()

@@ -89,9 +89,15 @@ def create_db_engine(url: str | None = None, **kwargs: object) -> Engine:
         options["connect_args"] = connect_args
         # A pooler multiplexes many clients onto few backends; holding a large
         # local pool starves everyone else on the same project.
-        options.setdefault("pool_size", 5)
-        options.setdefault("max_overflow", 5)
-        options.setdefault("pool_recycle", 1800)
+        #
+        # Sizing arguments belong to QueuePool only. NullPool/SinglePool take
+        # none, and passing them makes create_engine raise TypeError — which
+        # would break the very configuration this branch exists to support.
+        poolclass = options.get("poolclass")
+        if poolclass is None or getattr(poolclass, "__name__", "") == "QueuePool":
+            options.setdefault("pool_size", 5)
+            options.setdefault("max_overflow", 5)
+            options.setdefault("pool_recycle", 1800)
 
     return create_engine(resolved, **options)
 
