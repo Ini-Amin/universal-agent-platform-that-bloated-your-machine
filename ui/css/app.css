@@ -166,15 +166,53 @@ body {
 }
 
 .canvas-toolbar {
-  height: 44px;
+  min-height: 44px;
+  height: auto;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
-  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 14px;
+  gap: 8px 12px;
   z-index: 10;
+}
+
+/* Clickable example tasks. The supported domains are research and bug bounty
+   only, so a beginner needs real working phrasings, not a placeholder hint.
+   They get their own row: sharing one with the input and the zoom controls
+   made the toolbar unreadable (verified in a browser, 2026-10-03). */
+.task-examples {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  order: 2;
+  min-width: 0;
+}
+
+.task-examples-label {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.task-example {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  border-radius: 10px;
+  padding: 2px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.task-example:hover,
+.task-example:focus-visible {
+  color: var(--fg);
+  border-color: var(--accent);
 }
 
 .toolbar-group {
@@ -1094,6 +1132,13 @@ textarea:focus-visible,
   .header-status {
     flex-wrap: wrap;
     min-width: 0;
+    max-width: 100%;
+  }
+  .task-examples {
+    width: 100%;
+    order: 3;          /* chips drop below the input on a phone */
+  }
+  .task-example {
     max-width: 100%;
   }
   .header-status {

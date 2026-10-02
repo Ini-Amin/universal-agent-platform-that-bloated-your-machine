@@ -89,9 +89,18 @@
       <main id="canvas" class="pane pane-canvas" data-pane="canvas">
         <div class="canvas-toolbar">
           <div class="toolbar-group">
-            <input type="text" id="task-input" aria-label="Task description" placeholder="Enter task (e.g. research best checkpointers)..." />
-            <button id="btn-proposal" class="btn">Generate proposal</button>
+            <input type="text" id="task-input" aria-label="Task description" placeholder="What do you want to research?" />
+            <button id="btn-proposal" class="btn" title="Preview the workflow before running it">Preview</button>
             <button id="btn-run-task" class="btn btn-accent">Run</button>
+          </div>
+          <!-- Clickable examples. A first-time user does not know what this
+               accepts; the supported domains are research and bug bounty only,
+               so showing real working inputs is more useful than a placeholder. -->
+          <div id="task-examples" class="task-examples" aria-label="Example tasks">
+            <span class="task-examples-label">Try:</span>
+            <button class="task-example" data-task="research vector databases for RAG">research vector databases for RAG</button>
+            <button class="task-example" data-task="research checkpoint strategies for agent workflows">research checkpoint strategies</button>
+            <button class="task-example" data-task="bug bounty on example.com">bug bounty on example.com</button>
           </div>
           <div class="toolbar-group">
             <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
@@ -978,6 +987,19 @@
     const btnProposal = document.getElementById('btn-proposal');
     const taskInput = document.getElementById('task-input');
     const proposalBannerContainer = document.getElementById('proposal-banner-container');
+
+    // Clickable examples: fill the box and run. A beginner should not have to
+    // guess the accepted phrasing — only `research` and `bug bounty on` route.
+    document.querySelectorAll('.task-example').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const text = btn.getAttribute('data-task') || btn.textContent.trim();
+        if (taskInput) {
+          taskInput.value = text;
+          taskInput.classList.remove('input-error');
+        }
+        executeTask(text);
+      });
+    });
 
     async function handleGenerateProposal(overrideInput = null) {
       const text = (overrideInput !== null ? overrideInput : taskInput?.value || '').trim();
