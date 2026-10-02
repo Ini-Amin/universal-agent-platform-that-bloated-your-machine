@@ -237,7 +237,11 @@ body {
 
 /* Right Inspector */
 .pane-inspector {
-  width: 320px;
+  /* 320px put the actual answer — a research report — into a 292px text
+     column at 11px. The result is what the user came for, so the pane gets
+     enough room to read it without horizontal squinting. */
+  width: 420px;
+  min-width: 340px;
   flex-shrink: 0;
   border-right: none;
   overflow-y: auto;
@@ -560,8 +564,23 @@ input[type="text"].input-error {
 }
 
 .output-code-block {
-  max-height: 320px;
+  /* Was max-height: 320px with 11px text in a 320px pane — the actual answer
+     was a scrollable sliver, which is the one thing a user came to read.
+     Let it use the pane, and keep the type at a readable size. */
+  max-height: 60vh;
   overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Artifact file name (basename only — the full path is on the title attr). */
+.artifact-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-width: 8ch;
 }
 
 .artifacts-list {

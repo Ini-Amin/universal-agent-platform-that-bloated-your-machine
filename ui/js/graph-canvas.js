@@ -380,20 +380,32 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
     if (rect.width < 40 || rect.height < 40) return; // container not laid out yet
 
     const pad = 48;
-    const fitZoom = Math.min(
-      (rect.width - pad * 2) / Math.max(maxX - minX, 1),
-      (rect.height - pad * 2) / Math.max(maxY - minY, 1),
-      1.25
-    );
-    const zoom = Math.min(Math.max(fitZoom, 0.2), 3);
+    // A wide pipeline (10 nodes x 190px) is far wider than the pane but only
+    // ~one node tall. Taking Math.min of both ratios made the height the
+    // binding constraint, so the graph shrank to a thin ribbon with unreadable
+    // labels (measured: graph height 39px in a 748px pane). Fit the width, and
+    // let the user scroll vertically if a graph is genuinely tall.
+    const widthFit = (rect.width - pad * 2) / Math.max(maxX - minX, 1);
+    const heightFit = (rect.height - pad * 2) / Math.max(maxY - minY, 1);
+    const fitZoom = Math.max(widthFit, Math.min(heightFit, widthFit * 2));
+    const zoom = Math.min(Math.max(fitZoom, 0.2), 1.25);
 
-    canvasStore.setState({
-      viewport: {
-        zoom,
-        x: cx - ((minX + maxX) / 2) * zoom,
-        y: cy - ((minY + maxY) / 2) * zoom,
-      },
-    });
+    // A graph wider than the pane must start at its LEFT edge. Centering it
+    // pushed the input node off-screen, so the user's first view was the middle
+    // of the pipeline with no way to tell where it began (seen in a browser:
+    // "arch Planni..." as the leftmost visible node). Centre only when it fits.
+    const graphW = (maxX - minX) * zoom;
+    const graphH = (maxY - minY) * zoom;
+    const fitsWidth = graphW <= rect.width - pad;
+    const fitsHeight = graphH <= rect.height - pad;
+    const x = fitsWidth
+      ? cx - ((minX + maxX) / 2) * zoom
+      : pad - minX * zoom;
+    const y = fitsHeight
+      ? cy - ((minY + maxY) / 2) * zoom
+      : pad - minY * zoom;
+
+    canvasStore.setState({ viewport: { zoom, x, y } });
   }
 
   svg.addEventListener('wheel', (e) => {

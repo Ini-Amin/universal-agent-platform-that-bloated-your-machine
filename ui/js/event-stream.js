@@ -246,6 +246,10 @@ export function createEventStream() {
     resync,
     ping,
     getStatus: () => connectionStatus,
+    // True when the socket was closed on purpose (switching execution, page
+    // teardown) rather than dropped. Callers use it to avoid warning the user
+    // about a disconnect they asked for.
+    isDeliberatelyClosed: () => manuallyClosed,
     onStatusChange: (fn) => {
       statusListeners.add(fn);
       return () => statusListeners.delete(fn);

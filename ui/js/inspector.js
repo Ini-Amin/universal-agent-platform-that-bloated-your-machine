@@ -536,11 +536,16 @@ export function initInspector(containerEl, { eventStream = null } = {}) {
       const itemsHtml = artifacts.map((art, idx) => {
         const typeStr = escapeHtml(art.type || 'artifact');
         const uriStr = art.uri || '';
+        // Show the FILE NAME, not the full path. The absolute path
+        // (`data/runs/artifacts/<uuid>/...`) is 80+ characters of noise that
+        // wrapped to 50px per row and buried the answer; the basename plus a
+        // hover title carries the same information for a human.
+        const baseName = uriStr ? uriStr.split('/').pop() : '';
         let uriRender = '';
         if (uriStr.startsWith('http://') || uriStr.startsWith('https://')) {
           uriRender = `<a href="${escapeHtml(uriStr)}" target="_blank" rel="noopener" class="artifact-link">${escapeHtml(uriStr)}</a>`;
         } else if (uriStr) {
-          uriRender = `<span class="artifact-uri font-mono" title="${escapeHtml(uriStr)}">${escapeHtml(uriStr)}</span>
+          uriRender = `<span class="artifact-name" title="${escapeHtml(uriStr)}">${escapeHtml(baseName)}</span>
             <button type="button" class="btn btn-sm btn-view-artifact" data-artifact-index="${idx}">View</button>
             <button type="button" class="btn btn-sm btn-copy-artifact" data-artifact-index="${idx}">Copy</button>`;
         } else {
@@ -556,7 +561,7 @@ export function initInspector(containerEl, { eventStream = null } = {}) {
 
       artifactsHtml = `
         <div class="artifacts-wrapper" style="margin-top: 10px;">
-          <div class="meta-label" style="margin-bottom: 4px;">Artifacts (${artifacts.length}):</div>
+          <div class="meta-label" style="margin-bottom: 4px;">Files (${artifacts.length}):</div>
           <ul class="artifacts-list">${itemsHtml}</ul>
         </div>
       `;

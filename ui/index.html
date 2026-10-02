@@ -223,13 +223,25 @@
           wsBadge.textContent = `stream: ${status}`;
           wsBadge.className = `badge badge-${status}`;
         }
-        if (_prevStreamStatus === 'open' && status !== 'open' && executionStore.getState().executionId) {
-          showToast({
-            kind: 'warn',
-            title: 'Stream Disconnected',
-            message: 'Live execution events are paused while reconnecting; runtime controls are unavailable.',
-            timeoutMs: 8000,
-          });
+        if (
+          _prevStreamStatus === 'open' &&
+          status !== 'open' &&
+          executionStore.getState().executionId
+        ) {
+          // Switching execution calls disconnect() on purpose, and a reload
+          // closes the socket too. Warning about either made the toast appear
+          // on every navigation while the badge still read "stream: open"
+          // (seen in a browser, 2026-10-03). Only warn when the stream was open
+          // and dropped without us asking — that is the case the user must act on.
+          const deliberate = eventStream?.isDeliberatelyClosed?.() === true;
+          if (!deliberate) {
+            showToast({
+              kind: 'warn',
+              title: 'Stream Disconnected',
+              message: 'Live execution events are paused while reconnecting; runtime controls are unavailable.',
+              timeoutMs: 8000,
+            });
+          }
         }
         _prevStreamStatus = status;
         if (uiStore.getState().consoleTab === 'controls') {
@@ -930,6 +942,12 @@
         if (graph && Array.isArray(graph.nodes)) {
           canvasStore.setState({ graph, selectedNodeIds: [], selectedEdgeIds: [], error: null });
           undoStack.push(graph, { actor: 'ai', description: 'Loaded execution graph', previous: previousGraph });
+          // A freshly loaded graph rendered at the default zoom, which left a
+          // 10-node pipeline as a small cluster in a 1000px pane with most of
+          // the space empty. Fit it once the layout has settled.
+          requestAnimationFrame(() => {
+            try { canvasCtrl?.fitToView(); } catch (_e) { /* layout not ready */ }
+          });
         } else {
           canvasStore.setState({ graph: null, selectedNodeIds: [], selectedEdgeIds: [], error: 'Execution graph contains no nodes.' });
         }
