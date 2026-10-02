@@ -1,6 +1,7 @@
 // §44/§45 WebSocket client + event log renderer
 // Reconnect-safe with exponential backoff and seq resync
 
+import { authHeaders, getApiToken } from './api.js';
 import { eventStore, executionStore } from './state.js';
 
 export function createEventStream() {
@@ -30,7 +31,11 @@ export function createEventStream() {
 
   function getWsUrl(executionId) {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}/ws/executions/${encodeURIComponent(executionId)}`;
+    // Browsers cannot set headers on a WS handshake, so the token rides as a
+    // query param (the one channel the server accepts; see server/auth.py).
+    const token = getApiToken();
+    const query = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${proto}//${window.location.host}/ws/executions/${encodeURIComponent(executionId)}${query}`;
   }
 
   function connect(executionId) {
@@ -98,7 +103,7 @@ export function createEventStream() {
   async function _syncTaskDetails(executionId) {
     if (!executionId) return;
     try {
-      const res = await fetch(`/tasks/${encodeURIComponent(executionId)}`);
+      const res = await fetch(`/tasks/${encodeURIComponent(executionId)}`, { headers: authHeaders() });
       if (res.ok) {
         const task = await res.json();
         if (executionStore.getState().executionId === executionId) {

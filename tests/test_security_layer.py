@@ -300,10 +300,13 @@ def test_sandbox_network_rules() -> None:
     assert sb.check_network("example.com") == "example.com"
     with pytest.raises(SandboxViolation):
         sb.check_network("evil.com")
-    # 3. enabled with empty allowlist -> any host allowed
+    # 3. enabled with empty allowlist -> fail closed (denies any host)
     sb = Sandbox(SandboxPolicy(allow_network=True))
-    assert sb.check_network("anything.com") == "anything.com"
-
+    with pytest.raises(SandboxViolation):
+        sb.check_network("anything.com")
+    # 4. enabled with explicit allow_any_host escape hatch -> any host allowed
+    sb_any = Sandbox(SandboxPolicy(allow_network=True, allow_any_host=True))
+    assert sb_any.check_network("anything.com") == "anything.com"
 
 def test_sandbox_subprocess_rule() -> None:
     sb = Sandbox(SandboxPolicy(allow_subprocess=False))

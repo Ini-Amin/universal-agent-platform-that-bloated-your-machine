@@ -108,6 +108,43 @@ class ModelRouter:
             policy_applied=policy,
         )
 
+    def select_or_fallback(
+        self,
+        request: RoutingRequest,
+        fallback_model: str | None = None,
+    ) -> tuple[RoutingDecision, bool]:
+        """Pick the best model for ``request`` or fall back explicitly.
+
+        Returns ``(decision, is_fallback)``. When ``is_fallback`` is True,
+        logs a warning and returns an explicit fallback decision with the
+        failure reason recorded in ``decision.reason``.
+        """
+        import logging
+        import os
+
+        fallback_id = (
+            fallback_model
+            or os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol")
+        )
+        try:
+            return self.select(request), False
+        except RoutingError as exc:
+            logging.getLogger(__name__).warning(
+                "ModelRouter cannot satisfy capability %r: %s; explicitly falling back to %r",
+                getattr(request.capability, "value", request.capability),
+                exc,
+                fallback_id,
+            )
+            policy = self.resolver.resolve(runtime=request.policy)
+            decision = RoutingDecision(
+                model_id=fallback_id,
+                reason=f"explicit fallback to {fallback_id}: {exc}",
+                fallbacks=[],
+                estimated_cost_per_1k_in=0.0,
+                policy_applied=policy,
+            )
+            return decision, True
+
     def record_usage(self, model_id: str, usage: TokenUsage) -> None:
         """Feed one call's :class:`TokenUsage` into the router's tracker."""
         cost = self.estimate_cost(model_id, usage.tokens_in, usage.tokens_out)

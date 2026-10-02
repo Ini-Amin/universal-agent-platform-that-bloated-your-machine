@@ -15,6 +15,11 @@ complicates the graph for little gain.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from uap.models.router import ModelRouter, RoutingDecision
+    from uap.trace.model import DecisionTrace
 
 from uap.agents.base import BaseAgent
 from uap.contracts import AgentContext, AgentResult, AgentStatus
@@ -41,19 +46,29 @@ class LLMAgent(BaseAgent):
     def __init__(
         self,
         client: ChatClient | None = None,
-        router: "ModelRouter | None" = None,
+        router: ModelRouter | None = None,
         *,
         model_id: str | None = None,
+        capability: Any | None = None,
+        decision_sink: Any | None = None,
         name: str | None = None,
     ) -> None:
         super().__init__(name=name)
         self.client = client or ChatClient()
         self.router = router
         self.model_id = model_id
+        self.capability = capability
+        self.decision_sink = decision_sink
+        self.last_decision: RoutingDecision | None = None
+        self.last_trace: DecisionTrace | None = None
+        self.fallback_reason: str | None = None
+        self.last_fallback: dict[str, Any] | None = None
 
     async def _timed_run(self, context: AgentContext) -> AgentResult:
         messages = self._build_messages(context)
-        model = self._resolve_model()
+        cap = context.extras.get("capability") if context.extras else None
+        exec_id = context.extras.get("execution_id") if context.extras else None
+        model = self._resolve_model(capability=cap, execution_id=exec_id)
         try:
             text, usage = await self.client.complete(model, messages)
         except (LLMClientError, Exception) as exc:
@@ -86,15 +101,62 @@ class LLMAgent(BaseAgent):
             {"role": "user", "content": user_content},
         ]
 
-    def _resolve_model(self) -> str:
+    def _resolve_model(
+        self,
+        capability: Any | None = None,
+        execution_id: str | None = None,
+    ) -> str:
         if self.model_id:
             return self.model_id
         if self.router:
             from uap.models.catalog import ModelCapability
             from uap.models.router import RoutingRequest
+            from uap.trace.model import DecisionAlternative, DecisionTrace, DecisionType
 
-            decision = self.router.select(
-                RoutingRequest(capability=ModelCapability.REASONING)
+            cap = capability or self.capability or ModelCapability.REASONING
+            if isinstance(cap, str):
+                try:
+                    cap = ModelCapability(cap)
+                except ValueError:
+                    pass
+
+            decision, is_fallback = self.router.select_or_fallback(
+                RoutingRequest(capability=cap)  # type: ignore[arg-type]
             )
+            self.last_decision = decision
+            if is_fallback:
+                self.fallback_reason = decision.reason
+                self.last_fallback = {
+                    "capability": str(cap),
+                    "fallback_model": decision.model_id,
+                    "reason": decision.reason,
+                }
+            else:
+                self.fallback_reason = None
+                self.last_fallback = None
+
+            trace = DecisionTrace(
+                execution_id=execution_id or "local",
+                node_id=self.name,
+                decision_type=DecisionType.MODEL_SELECTION,
+                chosen=decision.model_id,
+                rationale=decision.reason,
+                alternatives=[
+                    DecisionAlternative(
+                        option=fb,
+                        reason_rejected="ranked lower by preference or policy",
+                    )
+                    for fb in decision.fallbacks
+                ],
+                confidence=1.0 if not is_fallback else 0.0,
+                inputs_summary={"capability": str(cap), "fallback": is_fallback},
+            )
+            self.last_trace = trace
+            if self.decision_sink is not None:
+                try:
+                    self.decision_sink(trace)
+                except Exception:
+                    pass
+
             return decision.model_id
-        return _DEFAULT_MODEL
+        return os.environ.get("UAP_DEFAULT_MODEL", _DEFAULT_MODEL)

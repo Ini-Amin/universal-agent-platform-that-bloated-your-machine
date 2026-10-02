@@ -40,6 +40,7 @@ class SandboxPolicy(BaseModel):
     allow_fs_read_paths: tuple[str, ...] = ()
     allow_network: bool = False
     allow_network_hosts: tuple[str, ...] = ()
+    allow_any_host: bool = False
     max_cpu_seconds: float = 5.0
     max_memory_mb: int = 512
     max_output_bytes: int = 65536
@@ -78,15 +79,22 @@ class Sandbox:
     def check_network(self, host: str) -> str:
         """Allow a host only when networking is enabled and the host is listed.
 
-        Empty ``allow_network_hosts`` with ``allow_network=True`` means any host.
+        Fail-closed default: ``allow_network=True`` with an empty
+        ``allow_network_hosts`` denies ALL hosts unless ``allow_any_host=True``
+        is explicitly set as an escape hatch.
         """
         if not self._policy.allow_network:
             raise SandboxViolation("network access disabled")
+        if self._policy.allow_any_host:
+            return host
         hosts = self._policy.allow_network_hosts
-        if hosts and host not in hosts:
+        if not hosts:
+            raise SandboxViolation(
+                f"network host denied (empty allowlist; allow_any_host=False): {host}"
+            )
+        if host not in hosts:
             raise SandboxViolation(f"network host not allowed: {host}")
         return host
-
     def check_subprocess(self) -> None:
         """Allow subprocess use only when the policy opts in. Else raise."""
         if not self._policy.allow_subprocess:

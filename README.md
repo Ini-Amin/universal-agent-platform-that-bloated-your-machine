@@ -202,6 +202,53 @@ $env:UAP_LLM_ENABLED="1"; $env:UAP_LLM_BASE_URL="https://your-endpoint-here/v1";
 
 Then research reports get a real `## Analysis` section written by the model.
 
+### Authentication (optional, off by default)
+
+**The API ships unauthenticated.** With no token set, every route — including
+`POST /approvals/{id}/decide` — is open to anyone who can reach the port. That is the
+local-first default and it is only safe because the server binds to `127.0.0.1`.
+**Set a token before you expose the port to anything else** (a LAN, a tunnel, a container
+network, `--host 0.0.0.0`).
+
+```bash
+export UAP_API_TOKEN=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
+uvicorn uap.server.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+With `UAP_API_TOKEN` set, every route requires the token:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/tasks          # 401
+curl -H "Authorization: Bearer $UAP_API_TOKEN" http://127.0.0.1:8000/tasks     # 200
+```
+
+| | |
+|---|---|
+| **HTTP** | `Authorization: Bearer <token>` |
+| **WebSocket** (`/ws/executions/{id}`) | `?token=<token>` — browsers cannot set headers on a WS handshake |
+| **Rejected HTTP** | `401 {"detail": "unauthorized"}` |
+| **Rejected WS** | handshake closed with code `1008` (policy violation) |
+| **Exempt** (no token needed) | `/`, `/index.html`, `/js/*`, `/css/*`, `/legacy` — the UI shell, so the page can load and then present its token |
+
+The token is compared with `secrets.compare_digest` (constant-time) and is never logged
+nor echoed in a response body. A blank value (`UAP_API_TOKEN=""`) counts as unset.
+
+**Giving the token to the browser UI.** There is no login page. Open the UI once with the
+token in the query string:
+
+```
+http://127.0.0.1:8000/?token=YOUR_TOKEN
+```
+
+`ui/js/api.js` stores it in `localStorage` under `uap_api_token`, strips it from the URL
+(so it stays out of history and the `Referer` header), and attaches it to every `fetch`
+and to the WebSocket URL. To clear it, run `localStorage.removeItem('uap_api_token')` in
+the browser console. To rotate, re-open the UI with the new `?token=`.
+
+This is a single shared bearer token, not user accounts: it answers "is this request
+allowed to reach the API", not "who sent it". Multi-user attribution still comes from the
+`user_id` / `decided_by` fields in the request bodies.
+
 ### Real embeddings (optional)
 
 Install [ollama](https://ollama.com/download), then:
@@ -228,7 +275,9 @@ To enable real web research, configure search and fetch capabilities in one of t
    export UAP_MCP_ENABLED=1
    ```
    Any registered MCP tool whose name contains `.search` or `search` acts as the search provider;
-   tools matching `.fetch`, `crawl`, or `scrape` act as the page fetcher.
+   tools matching `.fetch`, `crawl`, or `scrape` act as the page fetcher. Academic sources are
+   picked up the same way: a tool whose name contains `paper`, `arxiv`, `pubmed`, `scholar`, or
+   `semantic` (e.g. Smithery's "Paper Search", a PubMed server) supplies the paper evidence.
 
 2. **HTTP endpoints (gateways like 9router or custom proxies)**
    Point to any OpenAI/Exa-compatible search and fetch API:
@@ -242,7 +291,9 @@ To enable real web research, configure search and fetch capabilities in one of t
 
 3. **Built-in stubs (default fallback)**
    When neither MCP tools nor HTTP URLs are configured, research falls back to deterministic
-   offline stubs, clearly labelled with the `SIMULATION` banner in generated reports.
+   offline stubs, clearly labelled with the `SIMULATION` banner in generated reports. The web,
+   papers, and docs collectors each resolve their own provider, so a partial configuration (say,
+   HTTP search but no fetch endpoint) still produces the banner for the collectors that fell back.
 ---
 
 ## Troubleshooting
@@ -349,6 +400,7 @@ result = asyncio.run(ResearchWorkflow().run(spec))
 | Variable | Default | Effect |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap` | Storage for runtime/events/knowledge |
+| `UAP_API_TOKEN` | **unset -> API auth OFF** | Set it to require `Authorization: Bearer <token>` on every route except the UI shell ([Authentication](#authentication-optional-off-by-default)) |
 | `UAP_LLM_ENABLED` | off | `1`/`true`/`yes` -> research reports get a real LLM `## Analysis` section |
 | `UAP_LLM_BASE_URL` | `http://127.0.0.1:20128` | Any OpenAI-compatible endpoint |
 | `UAP_LLM_API_KEY` | falls back to `ANTHROPIC_AUTH_TOKEN` | Bearer token; never logged |
@@ -427,6 +479,9 @@ domain miss. Working as designed; measured honestly.
 
 ### Safety model
 
+- API auth is **opt-in** and off by default: without `UAP_API_TOKEN` every route (approvals
+  included) is open to whoever can reach the port — fine on `127.0.0.1`, never elsewhere.
+  See [Authentication](#authentication-optional-off-by-default).
 - Tool risk tiers 0–3 enforced deterministically; tier-3 tools need an `APPROVED` ApprovalRequest.
 - bugbounty-mcp: all 11 tools tier-mapped; the default test suite uses a local mock server,
   never the real binary.

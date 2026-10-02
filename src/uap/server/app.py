@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -39,6 +42,7 @@ from uap.contracts import (
 )
 from uap.entry import EntryWorkflow
 from uap.observability import EventBus, EventKind, JsonlSink, MemorySink, ObsEvent, Tracer
+from uap.observability.sinks import DEFAULT_MAX_EVENTS
 from uap.router import Router, WorkflowRegistry
 from uap.workflows.bbp import WORKFLOW_NAME as BBP_WORKFLOW_NAME
 from uap.workflows.bbp import BBPWorkflow
@@ -49,12 +53,22 @@ from uap.workflows.scope import ScopeGate, ScopeRuleError
 from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG, MCPServerConfig
 from uap.server.mcp_lifecycle import start_mcp_tools, stop_mcp_tools
 
+from starlette.exceptions import WebSocketException
 from starlette.staticfiles import StaticFiles
 
+from uap.server.auth import (
+    close_unauthorized_websocket,
+    require_token,
+    scrub_token_from_logs,
+)
 from uap.server.ws import build_ws_router
-from uap.server.run_control import get_control, run_controls
+from uap.server.run_control import drop_control, get_control, run_controls
 
 __all__ = ["create_app", "EventStream"]
+
+from uap.observability.errors import log_swallowed_exception, redact_text
+
+logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _INDEX_HTML = _STATIC_DIR / "index.html"
@@ -70,6 +84,14 @@ _AVAILABLE_DOMAINS_EXAMPLE = (
 
 DEFAULT_RUNS_DIR = Path("./data/runs")
 DEFAULT_HEARTBEAT_SECONDS = 15.0
+#: How many buffered events the SSE stream replays to a new subscriber.
+#: Older history stays in ``MemorySink``/``JsonlSink``; the stream announces
+#: the cap in its opening ``meta`` frame instead of pretending replay is
+#: complete.
+DEFAULT_MAX_REPLAY = 1_000
+#: Retention cap for the in-memory run registry (FIFO by creation time).
+#: Evicted runs return 404 honestly rather than serving stale entries.
+DEFAULT_MAX_RUNS = 500
 
 # --------------------------------------------------------------------------- #
 # Request / response bodies
@@ -122,6 +144,8 @@ class RunRecord:
     evidence_source: str = "deterministic-stubs"
     pending_approvals: list[dict[str, Any]] = field(default_factory=list)
     context: dict[str, Any] | None = None
+    created_at: float = field(default_factory=time.monotonic)
+
     def summary(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
@@ -143,30 +167,82 @@ class RunRecord:
             "pending_approvals": [dict(item) for item in self.pending_approvals],
         }
 
+class BoundedRuns(dict[str, RunRecord]):
+    """Dict that retains at most ``max_runs`` records, evicting oldest by ``created_at``.
+
+    Evicted runs return 404 (honest) rather than stale data. All keys pointing
+    to an evicted record (e.g. both task_id and execution_id) are removed.
+    """
+
+    def __init__(self, max_runs: int = DEFAULT_MAX_RUNS, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_runs = max_runs
+
+    def __setitem__(self, key: str, value: RunRecord) -> None:
+        super().__setitem__(key, value)
+        self._enforce_limit()
+
+    def _enforce_limit(self) -> None:
+        if self.max_runs is None:
+            return
+        seen: dict[int, RunRecord] = {}
+        for rec in self.values():
+            seen[id(rec)] = rec
+        if self.max_runs <= 0:
+            overflow = len(seen)
+        elif len(seen) > self.max_runs:
+            overflow = len(seen) - self.max_runs
+        else:
+            return
+
+        sorted_records = sorted(
+            seen.values(), key=lambda r: getattr(r, "created_at", 0.0)
+        )
+        victims = {id(r) for r in sorted_records[:overflow]}
+
+        keys_to_delete = [k for k, v in self.items() if id(v) in victims]
+        for k in keys_to_delete:
+            self.pop(k, None)
+        for r in sorted_records[:overflow]:
+            drop_control(r.task_id)
+
 # --------------------------------------------------------------------------- #
 # SSE fan-out
 # --------------------------------------------------------------------------- #
 
-def _format_sse(event: ObsEvent) -> str:
-    payload = json.dumps(event.model_dump(mode="json"), ensure_ascii=False, default=str)
+def _format_sse(event: ObsEvent | dict[str, Any]) -> str:
+    if isinstance(event, ObsEvent):
+        payload = json.dumps(event.model_dump(mode="json"), ensure_ascii=False, default=str)
+    else:
+        payload = json.dumps(event, ensure_ascii=False, default=str)
     return f"data: {payload}\n\n"
 
 class EventStream:
-    """A bus sink that buffers every event and fans new ones out to live SSE
+    """A bus sink that buffers recent events and fans new ones out to live SSE
     subscribers.
 
-    The buffer makes the stream *replayable*: a client that connects after a run
-    finished (common with the synchronous test path) still receives the full
-    event history before the generator closes on the terminal event.
+    The buffer is bounded by ``max_events`` (FIFO eviction) so long-running
+    servers cannot exhaust process memory. Replay to any single subscriber is
+    capped at ``max_replay`` (newest-first slice of the matching buffered
+    history) and announced via an opening ``meta`` event (``replayed: N of M``)
+    so clients never mistake a capped replay for a complete history.
     """
 
-    def __init__(self) -> None:
-        self._events: list[ObsEvent] = []
+    def __init__(
+        self,
+        max_events: int = DEFAULT_MAX_EVENTS,
+        max_replay: int = DEFAULT_MAX_REPLAY,
+    ) -> None:
+        self.max_events = max_events
+        self.max_replay = max_replay
+        self._events: deque[ObsEvent] = deque(maxlen=max_events)
+        self._appended = 0
         self._subscribers: set[asyncio.Queue[ObsEvent]] = set()
 
     # -- EventBus sink -------------------------------------------------- #
 
     def __call__(self, event: ObsEvent) -> None:
+        self._appended += 1
         self._events.append(event)
         for queue in tuple(self._subscribers):
             try:
@@ -178,8 +254,13 @@ class EventStream:
 
     @property
     def events(self) -> list[ObsEvent]:
-        """A snapshot of every buffered event."""
+        """A snapshot of every buffered event, oldest first."""
         return list(self._events)
+
+    @property
+    def dropped(self) -> int:
+        """How many events the buffer cap has evicted since construction."""
+        return self._appended - len(self._events)
 
     # -- Streaming ------------------------------------------------------ #
 
@@ -188,16 +269,36 @@ class EventStream:
     ) -> AsyncIterator[str]:
         """Yield SSE frames for ``task_id`` (or every task when ``None``).
 
-        Emits the buffered history first, then live events, with a heartbeat
-        comment every ``heartbeat`` seconds of silence. Closes cleanly once a
-        ``task_finished`` event for the requested task has been delivered.
+        Emits a leading ``meta`` frame (``replayed: N of M``), then the
+        buffered history (clamped to ``max_replay`` newest events), then
+        live events with a heartbeat comment every ``heartbeat`` seconds of
+        silence. Closes cleanly once a ``task_finished`` event for the
+        requested task has been delivered.
         """
         queue: asyncio.Queue[ObsEvent] = asyncio.Queue()
         self._subscribers.add(queue)
         try:
-            for event in list(self._events):
-                if task_id is not None and event.task_id != task_id:
-                    continue
+            matching = [
+                ev for ev in self._events
+                if task_id is None or ev.task_id == task_id
+            ]
+            total_matching = len(matching)
+            replay_slice = (
+                matching[-self.max_replay :]
+                if self.max_replay > 0 and len(matching) > self.max_replay
+                else matching
+            )
+            # Honest announcement: expose exact replay coverage.
+            meta_payload = {
+                "kind": "meta",
+                "task_id": task_id,
+                "replayed": len(replay_slice),
+                "total_matching": total_matching,
+                "buffer_dropped": self.dropped,
+            }
+            yield _format_sse(meta_payload)
+
+            for event in replay_slice:
                 yield _format_sse(event)
                 if self._is_terminal(event, task_id):
                     return
@@ -229,7 +330,7 @@ class EventStream:
 # The application
 # --------------------------------------------------------------------------- #
 
-def _build_llm_synthesizer():
+def _build_llm_synthesizer(router: Any | None = None):
     """Build the async ``(question, verified) -> analysis`` callable for research.
 
     Returns ``None`` when no credentials are configured, so the server degrades
@@ -252,9 +353,18 @@ def _build_llm_synthesizer():
             f"- {record.get('claim', '')}" for record in verified[:20]
         ) or "- (no verified claims)"
         client = ChatClient()
+        model_id = os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol")
+        if router is not None:
+            from uap.models.catalog import ModelCapability
+            from uap.models.router import RoutingRequest
+
+            decision, _is_fb = router.select_or_fallback(
+                RoutingRequest(capability=ModelCapability.REASONING)
+            )
+            model_id = decision.model_id
         try:
             text, _usage = await client.complete(
-                os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol"),
+                model_id,
                 [
                     {
                         "role": "system",
@@ -285,9 +395,13 @@ def create_app(
     runs_dir: Path | None = None,
     run_inline: bool = False,
     llm_enabled: bool | None = None,
+    model_router: Any | None = None,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_SECONDS,
     mcp_enabled: bool | None = None,
     mcp_config: MCPServerConfig | None = None,
+    max_runs: int = DEFAULT_MAX_RUNS,
+    max_events: int = DEFAULT_MAX_EVENTS,
+    max_replay: int = DEFAULT_MAX_REPLAY,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -316,11 +430,29 @@ def create_app(
     _mcp_cfg = mcp_config if mcp_config is not None else BUG_BOUNTY_MCP_CONFIG
 
     jsonl_sink = JsonlSink(runs_root / "events.jsonl")
-    memory_sink = MemorySink()
-    stream = EventStream()
+    memory_sink = MemorySink(max_events=max_events)
+    stream = EventStream(max_events=max_events, max_replay=max_replay)
     event_bus.subscribe(jsonl_sink)
     event_bus.subscribe(memory_sink)
     event_bus.subscribe(stream)
+
+    # ModelRouter: construct ONE instance (ModelCatalog.default(), PolicyResolver()) if not injected
+    if model_router is None:
+        try:
+            from uap.models.catalog import ModelCatalog
+            from uap.models.policy import PolicyResolver
+            from uap.models.router import ModelRouter
+
+            catalog = ModelCatalog.default()
+            model_router = ModelRouter(catalog, PolicyResolver())
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "ModelRouter construction failed; server will continue without router",
+                level=logging.WARNING,
+            )
+            model_router = None
 
     entry = EntryWorkflow()
     # LLM synthesis: explicit param > env UAP_LLM_ENABLED > off. Off keeps the
@@ -331,7 +463,7 @@ def create_app(
         else os.environ.get("UAP_LLM_ENABLED", "").lower() in {"1", "true", "yes"}
     )
     research = ResearchWorkflow(
-        synthesizer=_build_llm_synthesizer() if _llm_wanted else None,
+        synthesizer=_build_llm_synthesizer(router=model_router) if _llm_wanted else None,
     )
     _instrument(research, event_bus)
 
@@ -347,7 +479,7 @@ def create_app(
     router = Router(registry)
     gate = ApprovalGate()
 
-    runs: dict[str, RunRecord] = {}
+    runs: dict[str, RunRecord] = BoundedRuns(max_runs=max_runs)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -357,7 +489,13 @@ def create_app(
                 mcp_registry, mcp_client = await asyncio.to_thread(
                     start_mcp_tools, _mcp_cfg,
                 )
-            except Exception:
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    f"MCP server {_mcp_cfg.name!r} failed to start",
+                    level=logging.WARNING,
+                )
                 mcp_registry, mcp_client = None, None
             if mcp_registry is not None and mcp_client is not None:
                 mcp_registry.approval_gate = gate
@@ -388,16 +526,27 @@ def create_app(
             app.state.mcp_client = None
 
 
-    app = FastAPI(title="Universal Agent Platform", version="0.1.0", lifespan=lifespan)
+    # Auth is opt-in: a no-op unless UAP_API_TOKEN is set (see server/auth.py).
+    # The access log would otherwise print the WS handshake's ?token= value.
+    scrub_token_from_logs()
+    app = FastAPI(
+        title="Universal Agent Platform",
+        version="0.1.0",
+        lifespan=lifespan,
+        dependencies=[Depends(require_token)],
+        exception_handlers={WebSocketException: close_unauthorized_websocket},
+    )
     app.state.bus = event_bus
     app.state.memory_sink = memory_sink
     app.state.jsonl_sink = jsonl_sink
     app.state.stream = stream
     app.state.runs = runs
+    app.state.max_runs = max_runs
     app.state.runs_dir = runs_root
     app.state.gate = gate
     app.state.entry = entry
     app.state.router = router
+    app.state.model_router = model_router
     app.state.research = research
     app.state.bbp = bbp
     app.state.run_inline = run_inline
@@ -441,17 +590,18 @@ def create_app(
                 from uap.models.client import ChatClient
 
                 slice_llm_client = ChatClient()
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).exception(
-                    "LLM enabled but ChatClient could not be constructed; "
-                    "slice runs will use deterministic output"
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "LLM enabled but ChatClient could not be constructed; slice runs will use deterministic output",
+                    level=logging.WARNING,
                 )
         app.state.slice = PlatformSlice(
             session_factory,
             artifacts_root=runs_root / "artifacts",
             llm_client=slice_llm_client,
+            model_router=model_router,
             approval_gate=gate,
         )
 
@@ -459,11 +609,12 @@ def create_app(
             node_runtime: Any = PlatformNodeRuntime(
                 app.state.slice.agents, app.state.slice.tools
             )
-        except Exception:
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "PlatformNodeRuntime unavailable; durable executions will echo inputs"
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "PlatformNodeRuntime unavailable; durable executions will echo inputs",
+                level=logging.WARNING,
             )
 
             class EchoNodeRuntime:
@@ -478,13 +629,14 @@ def create_app(
             node_runtime=node_runtime,
             approval_gate=gate,
         )
-    except Exception:
+    except Exception as exc:
         # No PostgreSQL / slice stack: the platform still boots and serves via
         # the legacy in-memory path (hard requirement — covered by tests).
-        import logging
-
-        logging.getLogger(__name__).exception(
-            "durable runtime unavailable; falling back to in-memory execution"
+        log_swallowed_exception(
+            logger,
+            exc,
+            "durable runtime unavailable; falling back to in-memory execution",
+            level=logging.WARNING,
         )
         app.state.service = None
         app.state.slice = None
@@ -599,7 +751,15 @@ def create_app(
             )
         except Exception as exc:  # noqa: BLE001 - surfaced through the run record
             record.status = "failed"
-            record.error = f"{type(exc).__name__}: {exc}"
+            record.error = f"{type(exc).__name__}: {redact_text(str(exc))}"
+            log_swallowed_exception(
+                logger,
+                exc,
+                "workflow execution failed",
+                level=logging.ERROR,
+                task_id=record.task_id,
+                workflow=record.workflow,
+            )
             event_bus.emit_kind(
                 EventKind.ERROR,
                 task_id=record.task_id,
@@ -607,6 +767,9 @@ def create_app(
                 error=record.error,
             )
         finally:
+            drop_control(record.task_id)
+            if spec.task_id != record.task_id:
+                drop_control(spec.task_id)
             gate_pending = [
                 req.model_dump(mode="json")
                 for req in gate.pending()
@@ -667,8 +830,14 @@ def create_app(
                         artifact_type = json.loads(meta_path.read_text(encoding="utf-8")).get(
                             "type", artifact_type
                         )
-                    except (OSError, ValueError):
-                        pass
+                    except (OSError, ValueError) as exc:
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            "failed to read artifact sidecar metadata",
+                            level=logging.DEBUG,
+                            meta_path=str(meta_path),
+                        )
                 resolved.append({"type": str(artifact_type), "uri": str(path)})
             record.artifacts = resolved
             # The run's output is the synthesis artifact's text when available
@@ -681,8 +850,14 @@ def create_app(
                         if path.is_file():
                             output = path.read_text(encoding="utf-8")
                             break
-                    except (OSError, UnicodeError):
-                        pass
+                    except (OSError, UnicodeError) as exc:
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            "failed to read artifact text content",
+                            level=logging.DEBUG,
+                            path=str(path),
+                        )
             if not output:
                 for item in resolved:
                     path = Path(item["uri"])
@@ -690,8 +865,14 @@ def create_app(
                         if path.is_file():
                             output = path.read_text(encoding="utf-8")
                             break
-                    except (OSError, UnicodeError):
-                        pass
+                    except (OSError, UnicodeError) as exc:
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            "failed to read artifact text content",
+                            level=logging.DEBUG,
+                            path=str(path),
+                        )
             record.output = output
             record.error = result.error
             record.status = "failed" if result.error else "completed"
@@ -712,12 +893,26 @@ def create_app(
                         for event in rows
                         if event.kind == "node_started" and event.node
                     ]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "failed to read execution events for node_history",
+                        level=logging.WARNING,
+                        execution_id=str(result.execution_id),
+                    )
         except Exception as exc:
             record.status = "failed"
-            record.error = f"{type(exc).__name__}: {exc}"
+            record.error = f"{type(exc).__name__}: {redact_text(str(exc))}"
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice execution failed",
+                level=logging.ERROR,
+                task_id=record.task_id,
+            )
         finally:
+            drop_control(record.task_id)
             gate_pending = [
                 req.model_dump(mode="json")
                 for req in gate.pending()
@@ -869,15 +1064,18 @@ def create_app(
             return wf.graph_spec()
         return None
 
-    def _node_statuses(task_id: str) -> dict[str, str]:
+    def _node_statuses(task_id: str) -> tuple[dict[str, str], bool]:
         """Derive per-node status from observability events.
 
         Two event sources exist: the server's in-memory sink (legacy path) and
         the durable PostgreSQL event store (slice path — it emits through the
         ExecutionService). Merge both so the canvas shows live state whichever
         path ran the task.
+
+        Returns (statuses, degraded_flag).
         """
         statuses: dict[str, str] = {}
+        degraded = False
 
         def apply(kind: str, node: str | None) -> None:
             if not node:
@@ -906,10 +1104,17 @@ def create_app(
                 if row is not None:
                     for event in EventRepository(session).read_since(row.id, 0):
                         apply(event.kind, event.node)
-        except Exception:
-            pass
+        except Exception as exc:
+            degraded = True
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to query durable node statuses from database",
+                level=logging.WARNING,
+                task_id=str(task_id),
+            )
 
-        return statuses
+        return statuses, degraded
 
     # -- /api/workflows -------------------------------------------------- #
 
@@ -1014,8 +1219,14 @@ def create_app(
                                 break
                 except (ValueError, TypeError):
                     pass
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to read execution graph from database",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
 
         record = runs.get(execution_id)
         if not found and record is not None:
@@ -1031,9 +1242,15 @@ def create_app(
                 from uap.graph import WorkflowGraph
 
                 payload = WorkflowGraph.from_dict(spec).to_dict()
-            except Exception:
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to parse workflow spec with WorkflowGraph; using raw spec",
+                    level=logging.DEBUG,
+                )
                 payload = spec
-            node_statuses = _node_statuses(execution_id)
+            node_statuses, is_degraded = _node_statuses(execution_id)
             for node in payload.get("nodes", []):
                 node["status"] = node_statuses.get(node["id"], "pending")
             execution_status = None
@@ -1051,11 +1268,19 @@ def create_app(
                         row2 = repo2.get(eid2) or repo2.get_by_correlation_id(eid2)
                         if row2 is not None:
                             execution_status = getattr(row2.status, "value", str(row2.status))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    is_degraded = True
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "failed to query execution status from database",
+                        level=logging.WARNING,
+                        execution_id=str(execution_id),
+                    )
             payload["execution"] = {"status": execution_status or "unknown"}
+            if is_degraded:
+                payload["degraded"] = True
             return payload
-
         # Real graph from the workflow's graph_spec.
         wf_name = record.workflow if record else None
         graph = _graph_for_workflow(wf_name) if wf_name else None
@@ -1063,12 +1288,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown execution")
 
         # Merge live node statuses.
-        node_statuses = _node_statuses(execution_id)
+        node_statuses, is_degraded = _node_statuses(execution_id)
         for node in graph.get("nodes", []):
             node["status"] = node_statuses.get(node["id"], "pending")
 
         exec_status = record.status if record else "unknown"
         graph["execution"] = {"status": exec_status}
+        if is_degraded:
+            graph["degraded"] = True
         return graph
 
     # -- /api/executions/{id}/pause & resume ----------------------------- #
@@ -1081,8 +1308,14 @@ def create_app(
             try:
                 svc.pause_request(execution_id)
                 return {"status": "paused"}
-            except Exception:
-                pass
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "service.pause_request failed; falling back to in-memory control",
+                    level=logging.WARNING,
+                    execution_id=str(execution_id),
+                )
 
         record = runs.get(execution_id)
         if record is None:
@@ -1101,8 +1334,14 @@ def create_app(
             try:
                 svc.resume(execution_id)
                 return {"status": "running"}
-            except Exception:
-                pass
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "service.resume failed; falling back to in-memory control",
+                    level=logging.WARNING,
+                    execution_id=str(execution_id),
+                )
 
         record = runs.get(execution_id)
         if record is None:
@@ -1140,8 +1379,14 @@ def create_app(
                         traces = [item.model_dump(mode="json") for item in items]
                 except (ValueError, TypeError):
                     pass
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to query execution traces from database",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
 
         if not found and execution_id in runs:
             found = True
@@ -1199,8 +1444,14 @@ def create_app(
                                         break
                 except (ValueError, TypeError):
                     pass
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to query execution context from database",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
 
         record = runs.get(execution_id)
         if not found and record is not None:
@@ -1259,8 +1510,13 @@ def create_app(
                     "source": "local",
                     "input_schema": spec.input_schema,
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to load local tools",
+                level=logging.WARNING,
+            )
         # MCP tools.
         mcp_tools = getattr(app.state, "mcp_tools", None)
         if mcp_tools is not None:
@@ -1274,8 +1530,13 @@ def create_app(
                         "source": "mcp",
                         "input_schema": spec.input_schema,
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to list MCP tools",
+                    level=logging.WARNING,
+                )
         return result
 
     @app.get("/api/resources/skills")
@@ -1300,8 +1561,13 @@ def create_app(
                         "domain": skill.domain,
                         "description": skill.description,
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to load skills from library",
+                level=logging.WARNING,
+            )
         return result
 
     @app.get("/api/resources/models")
@@ -1366,7 +1632,13 @@ def create_app(
                     }
                     for ws in items
                 ]
-        except Exception:
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to list workspaces from database",
+                level=logging.WARNING,
+            )
             return []
 
     @app.post("/api/workspaces")
@@ -1377,7 +1649,7 @@ def create_app(
             from uap.db.engine import session_scope
             with session_scope() as session:
                 store = WorkspaceStore(session=session)
-                ws = store.create(Workspace(name=body.name, description=body.description or ""))
+                ws = store.create(Workspace(id=str(uuid.uuid4()), name=body.name, description=body.description or ""))
                 session.commit()
                 return {
                     "id": str(ws.id),
@@ -1388,7 +1660,14 @@ def create_app(
                     "default_workflow_refs": ws.default_workflow_refs or [],
                 }
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"workspace creation failed: {exc}")
+            log_swallowed_exception(
+                logger,
+                exc,
+                "workspace creation failed",
+                level=logging.ERROR,
+                name=body.name,
+            )
+            raise HTTPException(status_code=503, detail=f"workspace creation failed: {redact_text(str(exc))}")
 
     # -- /api/tasks/{task_id}/artifacts ---------------------------------- #
 
@@ -1451,9 +1730,14 @@ def create_app(
                     }
                     for item in items
                 ]
-        except Exception:
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to list verified knowledge items",
+                level=logging.WARNING,
+            )
             return []
-
     @app.get("/api/knowledge/{knowledge_id}/provenance")
     async def get_knowledge_provenance(knowledge_id: str) -> dict[str, Any]:
         try:
@@ -1478,7 +1762,14 @@ def create_app(
                 }
         except HTTPException:
             raise
-        except Exception:
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to get knowledge provenance",
+                level=logging.WARNING,
+                knowledge_id=knowledge_id,
+            )
             raise HTTPException(status_code=404, detail="unknown knowledge item")
 
     # -- /api/library (unchanged) ---------------------------------------- #
@@ -1501,8 +1792,13 @@ def create_app(
                         "ref": entry.ref,
                         "definition_id": entry.definition_id,
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to list library entries from database",
+                level=logging.WARNING,
+            )
         return summary
 
     # Canvas IDE is the primary UI at the root: mounted LAST so every API route

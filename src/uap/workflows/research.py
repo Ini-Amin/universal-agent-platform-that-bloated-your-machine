@@ -6,8 +6,10 @@ Linear pipeline with fan-out evidence collection:
         -> evidence_filtering -> cross_verification -> synthesis -> review
 
 Every node is deterministic; the evidence sources are injectable async
-collectors. The real web / paper / docs collectors land in Step 8+ behind the
-same `Collector` signature.
+collectors. The web / paper / docs collectors resolve their provider in order
+MCP tool -> HTTP WebClient -> built-in stub, so research goes real as soon as
+a search provider is configured and stays offline (SIMULATION-labelled)
+otherwise.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ _ARTIFACT_SOURCE = "research_workflow"
 
 
 # --------------------------------------------------------------------------- #
-# Deterministic stub collectors (replaced by real sources in Step 8+)
+# Deterministic stub collectors: last-tier fallback for every real collector
 # --------------------------------------------------------------------------- #
 
 
@@ -153,6 +155,34 @@ def find_fetch_tool(tools: Any | None) -> Any | None:
     for spec in candidates:
         name_lower = getattr(spec, "name", "").lower()
         if any(term in name_lower for term in ("fetch", "crawl", "scrape")):
+            return spec
+    return None
+
+
+#: Name fragments marking an MCP tool as an academic/paper source
+#: (Smithery "Paper Search", ``arxiv.mcp``, ``pubmed.search``, ...).
+_PAPER_TOOL_TERMS = ("paper", "arxiv", "pubmed", "scholar", "semantic")
+
+#: Appended to the question on the HTTP path: a general search provider has no
+#: site filter here, so bias the query toward academic results.
+_PAPERS_QUERY_SUFFIX = " arxiv paper"
+
+
+def find_paper_tool(tools: Any | None) -> Any | None:
+    """Find the first MCP tool registered for academic/paper search capability.
+
+    The portable path: the tool name is the only signal a generic MCP server
+    exposes, so first registered match on ``_PAPER_TOOL_TERMS`` wins.
+    """
+    if tools is None:
+        return None
+    try:
+        candidates = tools.list()
+    except Exception:
+        return None
+    for spec in candidates:
+        name_lower = getattr(spec, "name", "").lower()
+        if any(term in name_lower for term in _PAPER_TOOL_TERMS):
             return spec
     return None
 
@@ -395,6 +425,64 @@ async def docs_collector(
     return CollectorResults(await stub_docs_collector(question), provider="stub:docs")
 
 
+def _paper_items(results: list[dict[str, Any]], provider_tag: str) -> list[Evidence]:
+    """Map search results to ``source="papers"`` Evidence, skipping url-less rows."""
+    items: list[Evidence] = []
+    for rank, res in enumerate(results):
+        url = str(res.get("url") or res.get("link") or "").strip()
+        if not url:
+            continue
+        claim = str(res.get("title") or res.get("snippet") or "Paper finding").strip()
+        items.append(
+            _item("papers", claim, url, _confidence_from_rank(rank), provider=provider_tag)
+        )
+    return items
+
+
+async def papers_collector(
+    question: str,
+    web_client: Any | None = None,
+    tools: Any | None = None,
+) -> list[Evidence]:
+    """Collect academic evidence via MCP paper tool, HTTP WebClient, or fallback stub."""
+    # The generic search transports have no academic filter, so the query itself
+    # carries the bias toward papers.
+    query = f"{question}{_PAPERS_QUERY_SUFFIX}"
+
+    # 1. MCP tool: a paper-flavoured server wins, else any registered search tool.
+    tool = find_paper_tool(tools) or find_search_tool(tools)
+    if tool is not None and tools is not None:
+        try:
+            results = await call_mcp_search(tools, tool, query)
+            items = _paper_items(results, f"mcp:{tool.name}")
+            if items:
+                return CollectorResults(items, provider=f"mcp:{tool.name}")
+        except Exception:
+            pass
+
+    # 2. HTTP WebClient (configured via env or injected)
+    client = web_client
+    if client is None:
+        try:
+            from uap.models.web import WebClient
+            client = WebClient()
+        except Exception:
+            client = None
+
+    if client is not None and getattr(client, "is_search_configured", False):
+        try:
+            results = await client.search(query)
+            provider_tag = f"http:{client.search_provider}"
+            items = _paper_items(results, provider_tag)
+            if items:
+                return CollectorResults(items, provider=provider_tag)
+        except Exception:
+            pass
+
+    # 3. Deterministic stub fallback
+    return CollectorResults(await stub_papers_collector(question), provider="stub:papers")
+
+
 DEFAULT_COLLECTORS: tuple[Collector, ...] = (
     stub_web_collector,
     stub_papers_collector,
@@ -443,11 +531,7 @@ class ResearchWorkflow:
         if collectors is not None:
             self.collectors = tuple(collectors)
         elif self._has_real_provider():
-            self.collectors = (
-                self._make_web_collector(),
-                stub_papers_collector,
-                self._make_docs_collector(),
-            )
+            self.collectors = self._real_collectors()
         else:
             self.collectors = DEFAULT_COLLECTORS
         if not self.collectors:
@@ -490,6 +574,13 @@ class ResearchWorkflow:
         web_collector_runner.__name__ = "web_collector"
         return web_collector_runner
 
+    def _make_papers_collector(self) -> Collector:
+        async def papers_collector_runner(question: str) -> list[Evidence]:
+            return await papers_collector(question, web_client=self.web_client, tools=self.tools)
+
+        papers_collector_runner.__name__ = "papers_collector"
+        return papers_collector_runner
+
     def _make_docs_collector(self) -> Collector:
         async def docs_collector_runner(question: str) -> list[Evidence]:
             return await docs_collector(question, web_client=self.web_client, tools=self.tools)
@@ -497,8 +588,19 @@ class ResearchWorkflow:
         docs_collector_runner.__name__ = "docs_collector"
         return docs_collector_runner
 
+    def _real_collectors(self) -> tuple[Collector, ...]:
+        """The three real collectors; each still falls back to its own stub."""
+        return (
+            self._make_web_collector(),
+            self._make_papers_collector(),
+            self._make_docs_collector(),
+        )
+
     def _has_real_provider(self) -> bool:
-        if self._tools is not None and find_search_tool(self._tools) is not None:
+        if self._tools is not None and (
+            find_search_tool(self._tools) is not None
+            or find_paper_tool(self._tools) is not None
+        ):
             return True
         if self.web_client is not None and getattr(self.web_client, "is_search_configured", False):
             return True
@@ -514,11 +616,7 @@ class ResearchWorkflow:
     def tools(self, value: Any | None) -> None:
         self._tools = value
         if self._collectors_were_default and self._has_real_provider():
-            self.collectors = (
-                self._make_web_collector(),
-                stub_papers_collector,
-                self._make_docs_collector(),
-            )
+            self.collectors = self._real_collectors()
 
 
     def graph_spec(self) -> dict[str, Any]:

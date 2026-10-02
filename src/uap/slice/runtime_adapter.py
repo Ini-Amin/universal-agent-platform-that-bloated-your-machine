@@ -15,11 +15,12 @@ ports, so edge wiring stays honest. A missing agent or a denied tool raises
 :class:`~uap.execution.context.NodeExecutionError`, which the engine turns into
 a failed node (never a crashed run).
 """
-
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from uap.observability.errors import log_swallowed_exception
 from uap.agents.registry import AgentRegistry
 from uap.context import ContextBudget, ContextCompiler
 from uap.context.scoring import filter_secrets
@@ -34,6 +35,8 @@ from uap.execution.context import ExecutionContext, NodeExecutionError
 from uap.graph import GraphNode, NodeKind
 from uap.tools.registry import ToolRegistry
 __all__ = ["PlatformNodeRuntime"]
+
+logger = logging.getLogger(__name__)
 
 
 def _output_port_names(node: GraphNode) -> list[str]:
@@ -351,7 +354,14 @@ class PlatformNodeRuntime:
                 with session_scope(self.session_factory) as session:
                     store = KnowledgeStore(session)
                     return self._extract_knowledge_items(store, query)
-            except Exception:
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to retrieve knowledge items from database",
+                    level=logging.WARNING,
+                    query=query[:60],
+                )
                 return []
         return []
 
@@ -367,10 +377,20 @@ class PlatformNodeRuntime:
 
                     res = store.search(query, embedder=get_embedder())
                     items = [r[0] if isinstance(r, tuple) else r for r in res]
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "knowledge search with embedder failed",
+                        level=logging.DEBUG,
+                    )
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "knowledge store search failed",
+                    level=logging.DEBUG,
+                )
         if not items and hasattr(store, "list_by_status"):
             try:
                 from uap.knowledge.model import KnowledgeStatus
@@ -380,8 +400,13 @@ class PlatformNodeRuntime:
                     if found:
                         items.extend(found)
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "knowledge list_by_status failed",
+                    level=logging.DEBUG,
+                )
         if not items:
             for attr in ("list_all", "get_all", "list", "items"):
                 val = getattr(store, attr, None)
@@ -390,8 +415,13 @@ class PlatformNodeRuntime:
                         items = list(val())
                         if items:
                             break
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            f"knowledge store {attr} call failed",
+                            level=logging.DEBUG,
+                        )
                 elif isinstance(val, (list, tuple)):
                     items = list(val)
                     if items:

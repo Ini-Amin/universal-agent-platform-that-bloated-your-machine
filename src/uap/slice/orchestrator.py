@@ -14,8 +14,9 @@ earlier results are preserved.
 from __future__ import annotations
 
 import asyncio
-import os
 import json
+import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -53,21 +54,24 @@ from uap.workspace.model import Workspace
 
 from .evaluation_gate import SliceEvaluator
 from .runtime_adapter import PlatformNodeRuntime
+from uap.observability.errors import log_swallowed_exception
 
 __all__ = ["PlatformSlice", "SliceResult"]
 
+logger = logging.getLogger(__name__)
 _WORKFLOW_NAME = "research-slice"
 _WORKFLOW_VERSION = 1
 _WORKFLOW_REF = f"{_WORKFLOW_NAME}@v{_WORKFLOW_VERSION}"
 
 
-def _llm_synthesizer(client: Any) -> Any:
+def _llm_synthesizer(client: Any, router: Any | None = None) -> Any:
     """Build the async ``(question, verified) -> analysis`` callable the
     research pipeline's synthesis node appends to the report.
 
     Kept here (not in the server) so the §71 slice owns its own LLM contract;
     the server builds the same shape for its legacy path.
     """
+    last_decision: list[Any] = []
 
     async def synthesize(
         question: str,
@@ -83,8 +87,19 @@ def _llm_synthesizer(client: Any) -> Any:
             for section in context.context_sections:
                 user_parts.append(f"### {section.key}\n{section.content}")
         user_parts.append(f"Verified claims:\n{claims}")
+        model_id = os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol")
+        if router is not None:
+            from uap.models.catalog import ModelCapability
+            from uap.models.router import RoutingRequest
+
+            decision, _is_fb = router.select_or_fallback(
+                RoutingRequest(capability=ModelCapability.REASONING)
+            )
+            model_id = decision.model_id
+            last_decision.append(decision)
+
         text, _usage = await client.complete(
-            os.environ.get("UAP_DEFAULT_MODEL", "gpt-5.6-sol"),
+            model_id,
             [
                 {
                     "role": "system",
@@ -104,6 +119,7 @@ def _llm_synthesizer(client: Any) -> Any:
         )
         return text
 
+    synthesize.last_decision = last_decision  # type: ignore[attr-defined]
     return synthesize
 
 
@@ -264,6 +280,7 @@ class PlatformSlice:
         tools: ToolRegistry | None = None,
         workspaces: list[Workspace] | None = None,
         llm_client: "ChatClient | None" = None,
+        model_router: Any | None = None,
         embedder: "Embedder | None" = None,
         git_repo: Any | None = None,
         git_definitions_root: Path | str = "definitions",
@@ -274,6 +291,7 @@ class PlatformSlice:
         self.approval_gate = approval_gate
         self._artifacts_root = Path(artifacts_root)
         self._llm_client = llm_client
+        self._model_router = model_router
         self.tools = tools or self._default_tools()
         if self.approval_gate is not None and getattr(self.tools, "approval_gate", None) is None:
             self.tools.approval_gate = self.approval_gate
@@ -282,8 +300,11 @@ class PlatformSlice:
             # the durable graph). Built lazily to avoid an import cycle and to
             # let callers inject a custom pipeline (e.g. BBP) later.
             from uap.workflows.research import ResearchWorkflow
-
-            synth = _llm_synthesizer(llm_client) if llm_client is not None else None
+            synth = (
+                _llm_synthesizer(llm_client, router=model_router)
+                if llm_client is not None
+                else None
+            )
             pipeline = ResearchWorkflow(synthesizer=synth, tools=self.tools)
         self.pipeline = pipeline
         if embedder is None:
@@ -320,7 +341,9 @@ class PlatformSlice:
 
         registry = AgentRegistry()
         if self._llm_client is not None:
-            registry.register(LLMAgent(client=self._llm_client))
+            registry.register(
+                LLMAgent(client=self._llm_client, router=self._model_router)
+            )
         else:
             registry.register(EchoAgent(name="llm"))
         registry.register(EchoAgent())
@@ -390,7 +413,13 @@ class PlatformSlice:
                         kind="workflow"
                     ):
                         existing.append((entry.name, entry.ref))
-            except Exception:
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to list existing workflows in library",
+                    level=logging.WARNING,
+                )
                 existing = []
             for name, ref in existing:
                 if "research-slice" in name:
@@ -483,6 +512,12 @@ class PlatformSlice:
         try:
             ref, was_existing = self._resolve_or_register_workflow()
         except Exception as exc:  # keep going on a canonical fallback
+            log_swallowed_exception(
+                logger,
+                exc,
+                "workflow registration failed; using fallback",
+                level=logging.WARNING,
+            )
             ref, was_existing = _WORKFLOW_REF, False
             self._graphs[ref] = build_research_graph()
             out.error = f"workflow registration failed, using fallback: {exc!r}"
@@ -515,6 +550,13 @@ class PlatformSlice:
             status = service.status(execution_id)
             out.execution_status = status.get("status", "")
         except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice execution failed",
+                level=logging.ERROR,
+                task_id=task.task_id,
+            )
             out.error = (out.error + " | " if out.error else "") + f"execution failed: {exc!r}"
             return out
 
@@ -526,8 +568,14 @@ class PlatformSlice:
                 _seq, state = checkpoints[-1]
                 node_results = dict(state.get("node_results") or {})
         except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice checkpoint read failed",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
             out.error = (out.error + " | " if out.error else "") + f"checkpoint read failed: {exc!r}"
-
         # 6. Decision traces (ROUTING always; SCOPE_CHECK for bbp).
         traces = 0
         recorder = DecisionRecorder(self._session_factory)
@@ -553,10 +601,56 @@ class PlatformSlice:
                     )
                 )
                 traces += 1
+
+            # Model routing decision trace
+            model_decision = None
+            synth = getattr(self.pipeline, "synthesizer", None)
+            if synth is not None and getattr(synth, "last_decision", None):
+                model_decision = synth.last_decision[-1]
+            if model_decision is None:
+                llm_agent = self.agents.get("llm")
+                if llm_agent is not None and getattr(llm_agent, "last_decision", None):
+                    model_decision = llm_agent.last_decision
+            if model_decision is None and self._model_router is not None:
+                from uap.models.catalog import ModelCapability
+                from uap.models.router import RoutingRequest
+
+                model_decision, _ = self._model_router.select_or_fallback(
+                    RoutingRequest(capability=ModelCapability.REASONING)
+                )
+
+            if model_decision is not None:
+                from uap.trace.model import DecisionAlternative
+
+                recorder.record(
+                    DecisionTrace(
+                        execution_id=execution_id,
+                        node_id="synthesis",
+                        decision_type=DecisionType.MODEL_SELECTION,
+                        chosen=model_decision.model_id,
+                        rationale=model_decision.reason,
+                        alternatives=[
+                            DecisionAlternative(
+                                option=fb,
+                                reason_rejected="ranked lower by preference or fallback policy",
+                            )
+                            for fb in model_decision.fallbacks
+                        ],
+                        confidence=1.0,
+                        inputs_summary={"capability": "reasoning"},
+                    )
+                )
+                traces += 1
         except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice trace record failed",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
             out.error = (out.error + " | " if out.error else "") + f"trace record failed: {exc!r}"
         out.traces_recorded = traces
-
         out.context = runtime.get_inspectable_context()
         # 7. Artifacts: any node output carrying "content".
         saved: list[Artifact] = []
@@ -580,6 +674,14 @@ class PlatformSlice:
                     saved.append(stored)
                     out.artifacts.append(stored.artifact_id)
                 except Exception as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "slice artifact save failed",
+                        level=logging.WARNING,
+                        task_id=task.task_id,
+                        node=node_id,
+                    )
                     out.error = (out.error + " | " if out.error else "") + f"artifact save failed: {exc!r}"
                 break  # one artifact per node is enough
 
@@ -640,16 +742,28 @@ class PlatformSlice:
                     lifecycle.verify(item.knowledge_id, verification, actor="slice")
                     try:
                         lifecycle.promote(item.knowledge_id, actor="slice")
-                    except Exception:
+                    except Exception as exc:
                         # Promotion policy (confidence/provenance) may deny; the
                         # verified proposal still counts as knowledge-eligible.
+                        log_swallowed_exception(
+                            logger,
+                            exc,
+                            "slice knowledge promotion denied or failed; kept as verified",
+                            level=logging.DEBUG,
+                            knowledge_id=str(item.knowledge_id),
+                        )
                         pass
-                    session.commit()
                 finally:
                     session.close()
             except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "slice knowledge proposal/lifecycle failed",
+                    level=logging.WARNING,
+                    task_id=task.task_id,
+                )
                 out.error = (out.error + " | " if out.error else "") + f"knowledge failed: {exc!r}"
-
         # 9. Evaluation gate.
         try:
             evaluation = self.evaluator.evaluate(
@@ -662,8 +776,14 @@ class PlatformSlice:
             )
             out.evaluation = evaluation.model_dump(mode="json")
         except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice evaluation failed",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
             out.error = (out.error + " | " if out.error else "") + f"evaluation failed: {exc!r}"
-
         # 10. Git export (optional).
         if self.git_repo is not None:
             try:
@@ -675,12 +795,23 @@ class PlatformSlice:
                     "workflow", _WORKFLOW_NAME, _WORKFLOW_VERSION
                 )
             except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "slice git export failed",
+                    level=logging.WARNING,
+                )
                 out.error = (out.error + " | " if out.error else "") + f"git export failed: {exc!r}"
-
         # 11. Observability counts.
         try:
             out.events_emitted = len(service.events_since(execution_id))
         except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice events read failed",
+                level=logging.WARNING,
+                execution_id=str(execution_id),
+            )
             out.error = (out.error + " | " if out.error else "") + f"events read failed: {exc!r}"
-
         return out

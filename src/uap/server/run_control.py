@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-__all__ = ["RunControl", "run_controls", "get_control"]
+__all__ = ["RunControl", "run_controls", "get_control", "drop_control"]
 
 
 class RunControl:
@@ -60,3 +60,8 @@ def get_control(task_id: str) -> RunControl:
 def run_controls() -> dict[str, RunControl]:
     """Return the live registry (for cleanup / inspection)."""
     return _controls
+
+
+def drop_control(task_id: str) -> RunControl | None:
+    """Remove and return the control for ``task_id`` (e.g. after terminal state)."""
+    return _controls.pop(task_id, None)

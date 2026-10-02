@@ -1,14 +1,66 @@
 // §44 REST client wrappers matching the frozen contract
 
+// --- API token (opt-in auth; see src/uap/server/auth.py) -------------------
+// The server only requires a token when UAP_API_TOKEN is set. The token is
+// taken from `?token=...` on first load (then persisted and stripped from the
+// URL) or from localStorage. No login page: one value, one key.
+const TOKEN_KEY = 'uap_api_token';
+
+export function getApiToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return ''; // private mode / storage disabled
+  }
+}
+
+export function setApiToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage disabled: the ?token= query param still works per load */
+  }
+}
+
+// Adopt `?token=...` once, then scrub it so the token stays out of history,
+// bookmarks and the Referer header.
+export function adoptTokenFromUrl(loc = window.location, hist = window.history) {
+  const params = new URLSearchParams(loc.search);
+  const token = params.get('token');
+  if (!token) return getApiToken();
+  setApiToken(token);
+  params.delete('token');
+  const query = params.toString();
+  hist.replaceState(null, '', `${loc.pathname}${query ? `?${query}` : ''}${loc.hash || ''}`);
+  return token;
+}
+
+// Run once at module load so the very first request already carries the token.
+if (typeof window !== 'undefined' && window.location) {
+  adoptTokenFromUrl();
+}
+
+export function authHeaders() {
+  const token = getApiToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request(path, options = {}) {
   const res = await fetch(path, {
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...authHeaders(),
       ...options.headers,
     },
     ...options,
   });
+  if (res.status === 401) {
+    const err = new Error('HTTP 401: unauthorized - set an API token (?token=... or localStorage uap_api_token)');
+    err.status = 401;
+    throw err;
+  }
   if (!res.ok) {
     const errorText = await res.text().catch(() => res.statusText);
     const err = new Error(`HTTP ${res.status}: ${errorText}`);
