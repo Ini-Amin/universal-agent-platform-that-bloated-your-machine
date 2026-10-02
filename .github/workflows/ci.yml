@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  # Main suite: Python 3.15 (rc — allow-prereleases) + PostgreSQL/pgvector.
+  # All runtime deps are declared in pyproject.toml; a fresh install must work.
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: uap
+          POSTGRES_PASSWORD: uap_local_dev
+          POSTGRES_DB: uap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U uap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
+          allow-prereleases: true
+
+      - name: Create test database
+        run: |
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U uap -d uap \
+            -c 'CREATE DATABASE uap_test;'
+
+      - name: Install package (fresh install must succeed)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Apply migrations to uap_test
+        run: alembic upgrade head
+
+      - name: Run test suite
+        # No -x: with ~850 tests, seeing every failure in one run is more useful.
+        run: pytest -q
+
+  # LangGraph runner compatibility (needs Python <=3.13; langgraph has no 3.15 wheels).
+  langgraph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install package with langgraph extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev,langgraph]'
+
+      - name: Run LangGraph runner tests
+        run: pytest tests/test_langgraph_runner.py -q

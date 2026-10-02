@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UAP - Universal Agent Platform</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  header span { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 16px;
+    padding: 16px;
+    align-items: start;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    color: var(--muted);
+  }
+  textarea {
+    width: 100%;
+    min-height: 84px;
+    resize: vertical;
+    background: var(--panel-2);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-family: inherit;
+    font-size: 14px;
+  }
+  button {
+    margin-top: 10px;
+    background: var(--accent);
+    color: #06131f;
+    border: 0;
+    border-radius: 6px;
+    padding: 9px 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .run {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    background: var(--panel-2);
+  }
+  .run:hover { border-color: var(--accent); }
+  .run.active { border-color: var(--accent); }
+  .run .id { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+  .run .row { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+  .badge {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .badge.completed { color: var(--ok); border-color: var(--ok); }
+  .badge.failed { color: var(--err); border-color: var(--err); }
+  .badge.running, .badge.accepted { color: var(--warn); border-color: var(--warn); }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  pre {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    overflow: auto;
+    max-height: 320px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    margin: 0;
+  }
+  #log { max-height: 300px; color: #c9d1d9; }
+  .log-line { display: block; }
+  .log-line .k { color: var(--accent); }
+  .log-line.err .k { color: var(--err); }
+  .empty { color: var(--muted); font-style: italic; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>UAP</h1>
+  <span>Universal Agent Platform &middot; SSE live events</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>New task</h2>
+      <textarea id="input" placeholder="research the best langgraph checkpointer approach"></textarea>
+      <button id="submit">Run task</button>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Runs</h2>
+      <div id="runs"><span class="empty">No runs yet.</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Run detail</h2>
+    <div id="detail"><span class="empty">Select or submit a task.</span></div>
+    <h2 style="margin-top:18px">Live events</h2>
+    <pre id="log"><span class="empty">Waiting for a run...</span></pre>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var runsEl = document.getElementById("runs");
+  var detailEl = document.getElementById("detail");
+  var logEl = document.getElementById("log");
+  var inputEl = document.getElementById("input");
+  var submitEl = document.getElementById("submit");
+  var currentId = null;
+  var source = null;
+
+  function esc(text) {
+    return String(text == null ? "" : text).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+
+  function logLine(text, cls) {
+    if (logEl.querySelector(".empty")) { logEl.innerHTML = ""; }
+    var span = document.createElement("span");
+    span.className = "log-line" + (cls ? " " + cls : "");
+    span.textContent = text;
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function badge(status) {
+    return '<span class="badge ' + esc(status) + '">' + esc(status) + "</span>";
+  }
+
+  function renderRuns(list) {
+    if (!list.length) {
+      runsEl.innerHTML = '<span class="empty">No runs yet.</span>';
+      return;
+    }
+    runsEl.innerHTML = "";
+    list.forEach(function (run) {
+      var div = document.createElement("div");
+      div.className = "run" + (run.task_id === currentId ? " active" : "");
+      div.innerHTML =
+        '<div class="id">' + esc(run.task_id) + "</div>" +
+        '<div class="row"><span>' + esc(run.domain) + " / " + esc(run.workflow) + "</span>" +
+        badge(run.status) + "</div>";
+      div.onclick = function () { selectRun(run.task_id); };
+      runsEl.appendChild(div);
+    });
+  }
+
+  function renderDetail(run) {
+    var artifacts = (run.artifacts || []).map(function (a) {
+      return "&bull; " + esc(a.type) + " &rarr; " + esc(a.uri || "(inline)");
+    }).join("<br>") || '<span class="empty">none</span>';
+    var history = (run.node_history || []).map(function (n, i) {
+      return (i + 1) + ". " + esc(n);
+    }).join("\n") || "(pending)";
+    detailEl.innerHTML =
+      "<div><strong>" + esc(run.task_id) + "</strong> " + badge(run.status) + "</div>" +
+      '<div style="color:var(--muted);margin:6px 0">' +
+        esc(run.domain) + " / " + esc(run.workflow) + "</div>" +
+      "<div class=\"detail-grid\">" +
+        "<div><h2>Nodes</h2><pre>" + esc(history) + "</pre></div>" +
+        "<div><h2>Artifacts</h2><pre>" + artifacts + "</pre></div>" +
+      "</div>" +
+      "<h2 style=\"margin-top:14px\">Output</h2>" +
+      "<pre>" + esc(run.output || "(no output yet)") + "</pre>" +
+      (run.error ? "<h2 style=\"margin-top:14px\">Error</h2><pre>" + esc(run.error) + "</pre>" : "");
+  }
+
+  function refreshRuns() {
+    return fetch("/tasks")
+      .then(function (r) { return r.json(); })
+      .then(function (list) { renderRuns(list); return list; });
+  }
+
+  function selectRun(taskId) {
+    currentId = taskId;
+    refreshRuns();
+    logEl.innerHTML = '<span class="empty">Connecting...</span>';
+    if (source) { source.close(); source = null; }
+    fetch("/tasks/" + encodeURIComponent(taskId))
+      .then(function (r) { return r.json(); })
+      .then(renderDetail);
+
+    source = new EventSource("/events?task_id=" + encodeURIComponent(taskId));
+    source.onmessage = function (evt) {
+      var data = {};
+      try { data = JSON.parse(evt.data); } catch (e) { data = { raw: evt.data }; }
+      var kind = data.kind || "event";
+      var extra = data.node ? " [" + data.node + "]" : "";
+      logLine(kind + extra + "  " + (data.duration_ms ? Math.round(data.duration_ms) + "ms" : ""),
+              data.error ? "err" : "");
+      if (kind === "task_finished" || kind === "node_finished") {
+        fetch("/tasks/" + encodeURIComponent(taskId))
+          .then(function (r) { return r.json(); })
+          .then(function (run) {
+            renderDetail(run);
+            if (run.status === "completed" || run.status === "failed") {
+              refreshRuns();
+            }
+          });
+      }
+    };
+    source.onerror = function () { source.close(); };
+  }
+
+  function submitTask() {
+    var text = inputEl.value.trim();
+    if (!text) { return; }
+    submitEl.disabled = true;
+    fetch("/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: text, user_id: "web" })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res.status === "clarification") {
+          detailEl.innerHTML = "<h2>Clarification needed</h2><pre>" +
+            esc(res.question) + "</pre>";
+          logLine("clarification: " + res.question);
+        } else if (res.task_id) {
+          selectRun(res.task_id);
+        }
+        return refreshRuns();
+      })
+      .finally(function () { submitEl.disabled = false; });
+  }
+
+  submitEl.addEventListener("click", submitTask);
+  refreshRuns();
+})();
+</script>
+</body>
+</html>

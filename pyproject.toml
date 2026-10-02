@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "universal-agent-platform"
+version = "0.1.0"
+description = "Universal Agent Platform: modular, extensible, observable, resumable, domain-agnostic."
+requires-python = ">=3.12"
+# Runtime dependencies — every top-level import in src/uap must be declared here.
+# (Challenger finding: the suite only passed locally because these were
+#  installed ad hoc; a fresh install / CI would have broken.)
+dependencies = [
+    "pydantic>=2.9",
+    "sqlalchemy>=2.1",
+    "alembic>=1.20",
+    "psycopg[binary]>=3.3",
+    "pgvector>=0.3",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # uvicorn needs a WS protocol implementation; without it every /ws/*
+    # connection fails and the canvas status badge sticks at "connecting"
+    # (found live 2026-10-02 — plain uvicorn does not bundle one).
+    "websockets>=12",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+# LangGraph is optional and needs Python <=3.13 (no 3.15 wheels yet); see README.
+langgraph = ["langgraph>=1.2", "langgraph-checkpoint-sqlite>=3.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.uap]
+database_url = "postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap"

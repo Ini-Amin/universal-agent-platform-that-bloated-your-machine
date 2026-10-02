@@ -1,0 +1,1188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UAP - Visual Operating Environment</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div class="ide-container">
+    <!-- Top Header -->
+    <header class="ide-header">
+      <div style="display: flex; align-items: center; gap: 20px;">
+        <div class="logo">UAP <span>Visual Operating Environment</span></div>
+        <div class="workspace-picker">
+          <label for="workspace-select" class="workspace-label">Workspace:</label>
+          <select id="workspace-select" class="workspace-select">
+            <option value="">Default (in-memory)</option>
+          </select>
+          <button id="btn-new-workspace" class="btn btn-sm" title="Create Workspace">+ New</button>
+        </div>
+      </div>
+      <div class="header-status">
+        <span id="active-task-label" class="font-mono text-muted">No task selected</span>
+        <span id="active-status-badge" class="badge">idle</span>
+        <span id="ws-status-badge" class="badge badge-idle" title="Live execution stream connection">stream: idle</span>
+      </div>
+    </header>
+
+    <!-- Main 3-Pane Body (§52) -->
+    <div class="ide-body">
+      <!-- 1. Left Sidebar Pane (§52) -->
+      <aside id="sidebar" class="pane pane-sidebar" data-pane="sidebar">
+        <div class="sidebar-nav-container">
+          <nav class="sidebar-nav-menu">
+            <button class="sidebar-nav-btn active" data-nav="canvas">
+              <span>◈ Canvas</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="runs">
+              <span>▶ Runs</span>
+              <span id="nav-count-runs" class="badge badge-kind" style="font-size: 9px;">0</span>
+            </button>
+
+            <div class="sidebar-nav-section-title">LIBRARY</div>
+            <button class="sidebar-nav-btn" data-nav="agents">
+              <span>Agents</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="tools">
+              <span>Tools</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="skills">
+              <span>Skills</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="knowledge">
+              <span>Knowledge</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="artifacts">
+              <span>Artifacts</span>
+            </button>
+
+            <div class="sidebar-nav-section-title">SYSTEM</div>
+            <button class="sidebar-nav-btn" data-nav="models">
+              <span>Models</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="mcp">
+              <span>MCP</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="integrations">
+              <span>Integr.</span>
+            </button>
+            <button class="sidebar-nav-btn" data-nav="policies">
+              <span>Policies</span>
+            </button>
+          </nav>
+
+          <div id="sidebar-content" class="sidebar-list-container">
+            <!-- Dynamic list injected here based on active nav -->
+          </div>
+        </div>
+      </aside>
+
+      <!-- 2. Center Canvas Pane (§52/§55) -->
+      <main id="canvas" class="pane pane-canvas" data-pane="canvas">
+        <div class="canvas-toolbar">
+          <div class="toolbar-group">
+            <input type="text" id="task-input" aria-label="Task description" placeholder="Enter task (e.g. research best checkpointers)..." />
+            <button id="btn-proposal" class="btn">Generate proposal</button>
+            <button id="btn-run-task" class="btn btn-accent">Run</button>
+          </div>
+          <div class="toolbar-group">
+            <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
+            <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
+            <span class="toolbar-sep"></span>
+            <button id="btn-zoom-in" class="btn" title="Zoom In">+</button>
+            <button id="btn-zoom-out" class="btn" title="Zoom Out">-</button>
+            <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
+            <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
+          </div>
+        </div>
+
+        <!-- Proposal Panel (§52 directive) -->
+        <div id="proposal-banner-container" style="display: none;"></div>
+
+        <div id="graph-canvas-container" class="canvas-viewport-container"></div>
+      </main>
+
+      <!-- 3. Right Inspector Pane (§52/§53) -->
+      <aside id="inspector" class="pane pane-inspector" data-pane="inspector">
+        <div id="inspector-content"></div>
+      </aside>
+    </div>
+
+    <!-- 4. Bottom Event Console Pane (§45/§52) -->
+    <section id="console" class="pane pane-console" data-pane="console">
+      <div class="console-header">
+        <div class="console-tabs" role="tablist" aria-label="Event console sections">
+          <button id="btn-tab-events" class="console-tab-btn active" data-tab="events" role="tab" aria-selected="true" aria-controls="console-events">Events</button>
+          <button id="btn-tab-traces" class="console-tab-btn" data-tab="traces" role="tab" aria-selected="false" aria-controls="console-traces">Traces</button>
+          <button id="btn-tab-artifacts" class="console-tab-btn" data-tab="artifacts" role="tab" aria-selected="false" aria-controls="console-artifacts">Artifacts</button>
+          <button id="btn-tab-controls" class="console-tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="console-controls">Runtime Controls</button>
+        </div>
+        <button id="btn-toggle-console" class="btn btn-sm">Toggle</button>
+      </div>
+      <div id="console-body" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+        <div id="console-events" class="console-content" role="tabpanel" aria-label="Events" style="display: block;"></div>
+        <div id="console-traces" class="console-content" role="tabpanel" aria-label="Traces" style="display: none; padding: 8px;"></div>
+        <div id="console-artifacts" class="console-content" role="tabpanel" aria-label="Artifacts" style="display: none; padding: 8px;"></div>
+        <div id="console-controls" class="console-content" role="tabpanel" aria-label="Runtime Controls" style="display: none; padding: 12px;"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- New Workspace Modal Dialog -->
+  <div id="workspace-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-title">Create New Workspace</div>
+      <div class="modal-form-group">
+        <label for="new-workspace-name">Workspace Name</label>
+        <input type="text" id="new-workspace-name" placeholder="e.g. security-research" />
+      </div>
+      <div class="modal-form-group">
+        <label for="new-workspace-desc">Description (Optional)</label>
+        <textarea id="new-workspace-desc" rows="2" placeholder="Purpose or target of workspace..."></textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-workspace" class="btn">Cancel</button>
+        <button id="btn-save-workspace" class="btn btn-accent">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <script type="module">
+    import { canvasStore, executionStore, eventStore, uiStore } from './js/state.js';
+    import { createUndoStack } from './js/undo.js';
+    import { initGraphCanvas } from './js/graph-canvas.js';
+    import { initInspector } from './js/inspector.js';
+    import { createEventStream, initEventConsole } from './js/event-stream.js';
+    import {
+      createTask,
+      listTasks,
+      getTask,
+      getExecutionGraph,
+      getExecutionTraces,
+      listWorkspaces,
+      createWorkspace,
+      generateProposal,
+      getAgents,
+      getTools,
+      getSkills,
+      getKnowledge,
+      getModels,
+      getMcp,
+      getPolicies,
+      getTaskArtifacts,
+      pauseExecution,
+      resumeExecution,
+    } from './js/api.js';
+    import { showToast, showPromptToast, initToasts, dismissToast } from './js/toast.js';
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str).replace(/[&<>"']/g, (m) => {
+        switch (m) {
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          case "'": return '&#39;';
+          default: return m;
+        }
+      });
+    }
+
+    // Initialize Toast stack (§52/§54)
+    initToasts(document.getElementById('toast-container'));
+    const undoStack = createUndoStack({ limit: 100 });
+
+    // Initialize WebSocket event stream (§44/§45)
+    const eventStream = createEventStream();
+    // Surface WebSocket connection state to the header badge and toast on drops
+    const wsBadge = document.getElementById('ws-status-badge');
+    let _prevStreamStatus = 'idle';
+    if (eventStream?.onStatusChange) {
+      eventStream.onStatusChange((status) => {
+        if (wsBadge) {
+          wsBadge.textContent = `stream: ${status}`;
+          wsBadge.className = `badge badge-${status}`;
+        }
+        if (_prevStreamStatus === 'open' && status !== 'open' && executionStore.getState().executionId) {
+          showToast({
+            kind: 'warn',
+            title: 'Stream Disconnected',
+            message: 'Live execution events are paused while reconnecting; runtime controls are unavailable.',
+            timeoutMs: 8000,
+          });
+        }
+        _prevStreamStatus = status;
+        if (uiStore.getState().consoleTab === 'controls') {
+          renderConsoleTabContent('controls');
+        }
+      });
+    }
+
+    // Initialize Canvas (§55)
+    const canvasContainer = document.getElementById('graph-canvas-container');
+    const canvasCtrl = initGraphCanvas(canvasContainer, {
+      onNodeMoved: (graph) => {
+        undoStack.push(graph, { actor: 'user', description: 'Node moved' });
+        updateUndoButtons();
+      },
+    });
+
+    // Initialize Inspector (§53)
+    const inspectorContainer = document.getElementById('inspector-content');
+    initInspector(inspectorContainer, { eventStream });
+
+    // Initialize Event Console (§45)
+    const consoleEventsContainer = document.getElementById('console-events');
+    initEventConsole(consoleEventsContainer);
+
+    // Update Undo / Redo buttons
+    function updateUndoButtons() {
+      const btnUndo = document.getElementById('btn-undo');
+      const btnRedo = document.getElementById('btn-redo');
+      if (btnUndo) btnUndo.disabled = !undoStack.canUndo();
+      if (btnRedo) btnRedo.disabled = !undoStack.canRedo();
+    }
+
+    undoStack.subscribe(updateUndoButtons);
+
+    // Zoom Controls
+    document.getElementById('btn-zoom-in')?.addEventListener('click', () => canvasCtrl?.zoomIn());
+    document.getElementById('btn-zoom-out')?.addEventListener('click', () => canvasCtrl?.zoomOut());
+    document.getElementById('btn-zoom-fit')?.addEventListener('click', () => canvasCtrl?.fitToView());
+    document.getElementById('btn-zoom-reset')?.addEventListener('click', () => canvasCtrl?.resetView());
+
+    // Undo / Redo buttons. canUndo()/canRedo() gate the call so a null
+    // restore (baseline = empty canvas) is applied instead of being treated
+    // as "nothing to undo" and silently ignored.
+    function applyUndo() {
+      if (!undoStack.canUndo()) return;
+      canvasStore.setState({ graph: undoStack.undo() || null });
+    }
+
+    function applyRedo() {
+      if (!undoStack.canRedo()) return;
+      canvasStore.setState({ graph: undoStack.redo() || null });
+    }
+
+    document.getElementById('btn-undo')?.addEventListener('click', applyUndo);
+
+    document.getElementById('btn-redo')?.addEventListener('click', applyRedo);
+
+    // Keyboard shortcuts (§56). Guarded so typing in the task input, a
+    // toast reply box, or any other text field keeps the browser's native
+    // undo/redo instead of hijacking canvas history.
+    window.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          applyRedo();
+        } else {
+          e.preventDefault();
+          applyUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        applyRedo();
+      }
+    });
+
+    // Console collapse toggle
+    const consolePane = document.getElementById('console');
+    document.getElementById('btn-toggle-console')?.addEventListener('click', () => {
+      consolePane.classList.toggle('collapsed');
+    });
+
+    // Console Tabs switching
+    const consoleTabs = {
+      events: document.getElementById('console-events'),
+      traces: document.getElementById('console-traces'),
+      artifacts: document.getElementById('console-artifacts'),
+      controls: document.getElementById('console-controls'),
+    };
+    const tabBtns = {
+      events: document.getElementById('btn-tab-events'),
+      traces: document.getElementById('btn-tab-traces'),
+      artifacts: document.getElementById('btn-tab-artifacts'),
+      controls: document.getElementById('btn-tab-controls'),
+    };
+
+    function switchConsoleTab(tabName) {
+      uiStore.setState({ consoleTab: tabName });
+      for (const [k, el] of Object.entries(consoleTabs)) {
+        if (el) el.style.display = k === tabName ? 'block' : 'none';
+      }
+      for (const [k, btn] of Object.entries(tabBtns)) {
+        if (btn) {
+          btn.classList.toggle('active', k === tabName);
+          btn.setAttribute('aria-selected', k === tabName ? 'true' : 'false');
+        }
+      }
+      renderConsoleTabContent(tabName);
+    }
+
+    Object.keys(tabBtns).forEach((k) => {
+      tabBtns[k]?.addEventListener('click', () => switchConsoleTab(k));
+    });
+
+    async function renderConsoleTabContent(tabName) {
+      const execState = executionStore.getState();
+      const eid = execState.executionId;
+
+      if (tabName === 'traces') {
+        const el = consoleTabs.traces;
+        if (!el) return;
+        if (!eid) {
+          el.innerHTML = '<div class="text-muted">No execution active.</div>';
+          return;
+        }
+        try {
+          const traces = await getExecutionTraces(eid);
+          if (!traces || traces.length === 0) {
+            el.innerHTML = '<div class="text-muted">No decision traces recorded for this execution.</div>';
+            return;
+          }
+          el.innerHTML = traces.map((t) => `
+            <div style="background: var(--panel-2); border: 1px solid var(--border); padding: 6px 10px; border-radius: 4px; margin-bottom: 6px;">
+              <div style="display: flex; justify-content: space-between;">
+                <strong style="color: var(--accent);">${escapeHtml(t.decision_type || 'decision')}</strong>
+                <span class="text-muted">${t.confidence != null ? Math.round(t.confidence * 100) + '%' : ''}</span>
+              </div>
+              <div><strong>Chosen:</strong> ${escapeHtml(t.chosen || '')}</div>
+              <div class="text-muted">${escapeHtml(t.rationale || '')}</div>
+            </div>
+          `).join('');
+        } catch {
+          el.innerHTML = '<div class="text-muted">No decision traces available.</div>';
+        }
+      } else if (tabName === 'artifacts') {
+        const el = consoleTabs.artifacts;
+        if (!el) return;
+        if (!eid) {
+          el.innerHTML = '<div class="text-muted">No execution active.</div>';
+          return;
+        }
+        try {
+          const arts = await getTaskArtifacts(eid);
+          if (!arts || arts.length === 0) {
+            el.innerHTML = '<div class="text-muted">No artifacts recorded for this task.</div>';
+            return;
+          }
+          el.innerHTML = arts.map((a, idx) => `
+            <div style="display: flex; align-items: center; justify-content: space-between; background: var(--panel-2); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; margin-bottom: 4px;">
+              <div>
+                <span class="badge badge-kind">${escapeHtml(a.type || 'artifact')}</span>
+                <span class="font-mono" style="margin-left: 6px;">${escapeHtml(a.uri || 'no uri')}</span>
+              </div>
+              <button class="btn btn-sm btn-view-console-art" data-art-index="${idx}">Inspect</button>
+            </div>
+          `).join('');
+          el.querySelectorAll('.btn-view-console-art').forEach((btn) => {
+            btn.onclick = () => {
+              const idx = parseInt(btn.getAttribute('data-art-index'), 10);
+              const art = arts[idx];
+              if (art) {
+                uiStore.setState({ selectedResource: { type: 'artifact', data: { ...art, taskId: eid, index: idx } } });
+              }
+            };
+          });
+        } catch {
+          el.innerHTML = '<div class="text-muted">Artifacts endpoint offline or returned 404.</div>';
+        }
+      } else if (tabName === 'controls') {
+        const el = consoleTabs.controls;
+        if (!el) return;
+        const isRunning = execState.status === 'running';
+        const isPaused = execState.status === 'paused';
+        const canFork = Boolean(eid);
+        const streamState = eventStream?.getStatus?.() || 'idle';
+        const streamUp = streamState === 'open';
+        const offlineNote = streamUp
+          ? ''
+          : `<div class="text-muted" style="font-size: 11px; margin-top: 8px;">Execution stream ${escapeHtml(streamState)} — live control messages cannot be delivered.</div>`;
+
+        el.innerHTML = `
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div class="btn-group">
+              <button id="btn-ctrl-pause" class="btn btn-warn" ${isRunning ? '' : 'disabled'}>Pause Execution</button>
+              <button id="btn-ctrl-resume" class="btn btn-ok" ${isPaused ? '' : 'disabled'}>Resume Execution</button>
+              <button id="btn-ctrl-fork" class="btn btn-accent" ${canFork ? '' : 'disabled'}>Fork</button>
+            </div>
+            <span class="text-muted">Current Status: <span class="badge badge-${execState.status}">${execState.status}</span></span>
+          </div>
+          ${offlineNote}
+        `;
+        el.querySelector('#btn-ctrl-pause')?.addEventListener('click', async () => {
+          if (!eid) return;
+          try {
+            await pauseExecution(eid);
+          } catch (err) {
+            showToast({ kind: 'error', title: 'Pause Failed', message: err.message || String(err) });
+            return;
+          }
+          executionStore.setState({ status: 'paused' });
+          const delivered = eventStream?.pause?.() ?? false;
+          if (delivered) {
+            showToast({ kind: 'info', title: 'Paused', message: `Execution ${eid.slice(0, 8)} paused.` });
+          } else {
+            showToast({ kind: 'warn', title: 'Paused, stream offline', message: `Execution ${eid.slice(0, 8)} pause accepted, but the live stream is ${streamState} — live events resume after reconnect.`, timeoutMs: 8000 });
+          }
+        });
+        el.querySelector('#btn-ctrl-resume')?.addEventListener('click', async () => {
+          if (!eid) return;
+          try {
+            await resumeExecution(eid);
+          } catch (err) {
+            showToast({ kind: 'error', title: 'Resume Failed', message: err.message || String(err) });
+            return;
+          }
+          executionStore.setState({ status: 'running' });
+          const delivered = eventStream?.resume?.() ?? false;
+          if (delivered) {
+            showToast({ kind: 'info', title: 'Resumed', message: `Execution ${eid.slice(0, 8)} resumed.` });
+          } else {
+            showToast({ kind: 'warn', title: 'Resumed, stream offline', message: `Execution ${eid.slice(0, 8)} resume accepted, but the live stream is ${streamState} — live events resume after reconnect.`, timeoutMs: 8000 });
+          }
+        });
+        el.querySelector('#btn-ctrl-fork')?.addEventListener('click', () => {
+          showPromptToast({
+            title: 'Fork execution',
+            message: 'Enter a label for the forked execution:',
+            placeholder: 'e.g. branch-b',
+            submitLabel: 'Fork',
+            onSubmit: (label, toastId) => {
+              dismissToast(toastId);
+              if (!eventStream) return;
+              const delivered = eventStream.fork(label || '');
+              if (delivered) {
+                showToast({ kind: 'info', title: 'Fork Requested', message: `Fork "${label || 'untitled'}" requested.` });
+              } else {
+                showToast({ kind: 'error', title: 'Fork Not Sent', message: 'Execution stream is offline — fork was not delivered.' });
+              }
+            },
+          });
+        });
+      }
+    }
+
+    // --- Workspace Selector Flow ---
+    const workspaceSelect = document.getElementById('workspace-select');
+    const btnNewWorkspace = document.getElementById('btn-new-workspace');
+    const workspaceModal = document.getElementById('workspace-modal');
+    const btnCancelWorkspace = document.getElementById('btn-cancel-workspace');
+    const btnSaveWorkspace = document.getElementById('btn-save-workspace');
+    const inputWorkspaceName = document.getElementById('new-workspace-name');
+    const inputWorkspaceDesc = document.getElementById('new-workspace-desc');
+
+    async function loadWorkspaces() {
+      try {
+        const workspaces = await listWorkspaces();
+        if (Array.isArray(workspaces) && workspaces.length > 0) {
+          uiStore.setState({ workspaces });
+          workspaceSelect.innerHTML = workspaces
+            .map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`)
+            .join('');
+          const activeId = uiStore.getState().activeWorkspaceId || workspaces[0].id;
+          workspaceSelect.value = activeId;
+          uiStore.setState({ activeWorkspaceId: activeId });
+        } else {
+          workspaceSelect.innerHTML = '<option value="">Default (in-memory)</option>';
+          uiStore.setState({ workspaces: [], activeWorkspaceId: null });
+        }
+      } catch {
+        // Honest empty/offline state when 404 or PG down
+        workspaceSelect.innerHTML = '<option value="">Default (in-memory / offline)</option>';
+        uiStore.setState({ workspaces: [], activeWorkspaceId: null });
+      }
+    }
+
+    workspaceSelect?.addEventListener('change', (e) => {
+      uiStore.setState({ activeWorkspaceId: e.target.value || null });
+    });
+
+    btnNewWorkspace?.addEventListener('click', () => {
+      if (inputWorkspaceName) inputWorkspaceName.value = '';
+      if (inputWorkspaceDesc) inputWorkspaceDesc.value = '';
+      if (workspaceModal) workspaceModal.style.display = 'flex';
+      inputWorkspaceName?.focus();
+    });
+
+    btnCancelWorkspace?.addEventListener('click', () => {
+      if (workspaceModal) workspaceModal.style.display = 'none';
+    });
+
+    btnSaveWorkspace?.addEventListener('click', async () => {
+      const name = inputWorkspaceName?.value.trim();
+      if (!name) {
+        inputWorkspaceName?.classList.add('input-error');
+        return;
+      }
+      btnSaveWorkspace.disabled = true;
+      try {
+        const desc = inputWorkspaceDesc?.value.trim() || '';
+        const created = await createWorkspace(name, desc);
+        if (workspaceModal) workspaceModal.style.display = 'none';
+        showToast({ kind: 'info', title: 'Workspace Created', message: `Workspace "${name}" ready.` });
+        await loadWorkspaces();
+        if (created?.id) {
+          workspaceSelect.value = created.id;
+          uiStore.setState({ activeWorkspaceId: created.id });
+        }
+      } catch (err) {
+        showToast({ kind: 'error', title: 'Failed to create workspace', message: err.message || String(err) });
+      } finally {
+        btnSaveWorkspace.disabled = false;
+      }
+    });
+
+    // --- Sidebar Navigation Tree Flow ---
+    const sidebarNavBtns = document.querySelectorAll('.sidebar-nav-btn');
+    const sidebarContent = document.getElementById('sidebar-content');
+
+    // Selecting a library/run item highlights it; each nav's own handler sets
+    // uiStore.selectedResource, which the inspector renders as its detail view.
+    sidebarContent?.addEventListener('click', (e) => {
+      const item = e.target.closest('.list-item');
+      if (!item) return;
+      sidebarContent.querySelectorAll('.list-item.active').forEach((el) => el.classList.remove('active'));
+      item.classList.add('active');
+    });
+
+    sidebarNavBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nav = btn.getAttribute('data-nav');
+        if (!nav) return;
+        sidebarNavBtns.forEach((b) => b.classList.toggle('active', b === btn));
+        uiStore.setState({ sidebarNav: nav });
+        renderSidebarContent(nav);
+      });
+    });
+
+    async function renderSidebarContent(activeNav = null) {
+      const nav = activeNav || uiStore.getState().sidebarNav || 'runs';
+      if (!sidebarContent) return;
+
+      sidebarContent.innerHTML = '<div class="text-muted">Loading…</div>';
+
+      if (nav === 'canvas') {
+        const graph = canvasStore.getState().graph;
+        const nodesCount = (graph?.nodes || []).length;
+        sidebarContent.innerHTML = `
+          <div class="sidebar-list-header"><span>Canvas View</span></div>
+          <div class="text-muted" style="line-height: 1.5; font-size: 11px;">
+            <div>Status: ${graph ? 'Graph Loaded' : 'Empty Canvas'}</div>
+            <div>Nodes in graph: ${nodesCount}</div>
+            <div style="margin-top: 8px;">Use the toolbar above to generate workflow proposals or run tasks. Click nodes to inspect.</div>
+          </div>
+        `;
+      } else if (nav === 'runs') {
+        try {
+          const tasks = await listTasks();
+          const runCountEl = document.getElementById('nav-count-runs');
+          if (runCountEl) runCountEl.textContent = tasks ? tasks.length : '0';
+
+          if (!tasks || tasks.length === 0) {
+            sidebarContent.innerHTML = `
+              <div class="sidebar-list-header"><span>Executions (0)</span></div>
+              <div class="text-muted">No runs found.</div>
+            `;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Executions (${tasks.length})</span></div>`;
+          for (const t of tasks) {
+            const isCur = executionStore.getState().executionId === t.task_id;
+            const isStub = t.evidence_source === 'deterministic-stubs';
+            html += `
+              <div class="list-item run-item ${isCur ? 'active' : ''}" data-task-id="${escapeHtml(t.task_id)}">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="font-mono text-muted" style="font-size: 11px;">${t.task_id.slice(0, 8)}…</span>
+                  <span class="badge badge-${t.status || 'kind'}">${t.status}</span>
+                </div>
+                <div class="font-bold" style="margin-top: 2px;">${escapeHtml(t.workflow || 'Run')}</div>
+                ${isStub ? '<div style="margin-top: 4px;"><span class="badge badge-warn" style="font-size: 9px;">stubs</span></div>' : ''}
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+
+          sidebarContent.querySelectorAll('.run-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const taskId = el.getAttribute('data-task-id');
+              selectExecution(taskId);
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `
+            <div class="sidebar-list-header"><span>Executions</span></div>
+            <div class="text-muted">Failed to load runs.</div>
+          `;
+        }
+      } else if (nav === 'agents') {
+        try {
+          const agents = await getAgents();
+          if (!agents || agents.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Agents (0)</span></div><div class="text-muted">No agents registered.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Agents (${agents.length})</span></div>`;
+          for (const a of agents) {
+            html += `
+              <div class="list-item resource-item" data-res-name="${escapeHtml(a.name)}">
+                <div class="font-bold">${escapeHtml(a.name)}</div>
+                <div class="text-muted font-mono" style="font-size: 10px;">${(a.capabilities || []).length} capabilities</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const name = el.getAttribute('data-res-name');
+              const item = agents.find((a) => a.name === name);
+              uiStore.setState({ selectedResource: { type: 'agent', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Agents</span></div><div class="text-muted">Agents endpoint offline.</div>`;
+        }
+      } else if (nav === 'tools') {
+        try {
+          const tools = await getTools();
+          if (!tools || tools.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Tools (0)</span></div><div class="text-muted">No tools registered.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Tools (${tools.length})</span></div>`;
+          for (const t of tools) {
+            html += `
+              <div class="list-item resource-item" data-res-name="${escapeHtml(t.name)}">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <strong class="font-mono">${escapeHtml(t.name)}</strong>
+                  <span class="badge badge-warn" style="font-size: 9px;">T${t.risk_tier}</span>
+                </div>
+                <div class="text-muted" style="font-size: 10px; margin-top: 2px;">${escapeHtml(t.description || t.source || 'tool')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const name = el.getAttribute('data-res-name');
+              const item = tools.find((t) => t.name === name);
+              uiStore.setState({ selectedResource: { type: 'tool', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Tools</span></div><div class="text-muted">Tools endpoint offline.</div>`;
+        }
+      } else if (nav === 'skills') {
+        try {
+          const skills = await getSkills();
+          if (!skills || skills.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Skills (0)</span></div><div class="text-muted">No skills registered.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Skills (${skills.length})</span></div>`;
+          for (const s of skills) {
+            html += `
+              <div class="list-item resource-item" data-res-name="${escapeHtml(s.name)}">
+                <div style="display: flex; justify-content: space-between;">
+                  <strong>${escapeHtml(s.name)}</strong>
+                  <span class="badge badge-kind" style="font-size: 9px;">${escapeHtml(s.domain || '')}</span>
+                </div>
+                <div class="text-muted" style="font-size: 10px;">${escapeHtml(s.description || '')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const name = el.getAttribute('data-res-name');
+              const item = skills.find((s) => s.name === name);
+              uiStore.setState({ selectedResource: { type: 'skill', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Skills</span></div><div class="text-muted">Skills endpoint offline.</div>`;
+        }
+      } else if (nav === 'knowledge') {
+        try {
+          const items = await getKnowledge();
+          if (!items || items.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Knowledge (0)</span></div><div class="text-muted">No knowledge items (PG offline or empty).</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Knowledge (${items.length})</span></div>`;
+          for (const k of items) {
+            html += `
+              <div class="list-item resource-item" data-res-id="${escapeHtml(k.knowledge_id)}">
+                <div style="font-size: 12px; font-weight: 500;">${escapeHtml(k.statement)}</div>
+                <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 10px;">
+                  <span class="badge badge-kind">${escapeHtml(k.domain)}</span>
+                  <span class="text-muted">${Math.round((k.confidence || 0) * 100)}% conf</span>
+                </div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const id = el.getAttribute('data-res-id');
+              const item = items.find((k) => k.knowledge_id === id);
+              uiStore.setState({ selectedResource: { type: 'knowledge', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Knowledge</span></div><div class="text-muted">Knowledge endpoint offline.</div>`;
+        }
+      } else if (nav === 'artifacts') {
+        const curEid = executionStore.getState().executionId;
+        if (!curEid) {
+          sidebarContent.innerHTML = `
+            <div class="sidebar-list-header"><span>Artifacts</span></div>
+            <div class="text-muted">No run selected. Select a run to view its artifacts.</div>
+          `;
+          return;
+        }
+        try {
+          const arts = await getTaskArtifacts(curEid);
+          if (!arts || arts.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Artifacts (0)</span></div><div class="text-muted">No artifacts recorded for this task.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Artifacts (${arts.length})</span></div>`;
+          for (const a of arts) {
+            html += `
+              <div class="list-item resource-item" data-art-index="${a.index}">
+                <div style="display: flex; justify-content: space-between;">
+                  <span class="badge badge-kind">${escapeHtml(a.type || 'artifact')}</span>
+                  <span class="text-muted font-mono" style="font-size: 10px;">#${a.index}</span>
+                </div>
+                <div class="font-mono text-muted" style="font-size: 11px; margin-top: 2px; word-break: break-all;">${escapeHtml(a.uri || 'no uri')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const idx = parseInt(el.getAttribute('data-art-index'), 10);
+              const item = arts.find((a) => a.index === idx);
+              uiStore.setState({ selectedResource: { type: 'artifact', data: { ...item, taskId: curEid, index: idx } } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Artifacts</span></div><div class="text-muted">Artifacts endpoint offline.</div>`;
+        }
+      } else if (nav === 'models') {
+        try {
+          const models = await getModels();
+          if (!models || models.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Models (0)</span></div><div class="text-muted">No models registered.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Models (${models.length})</span></div>`;
+          for (const m of models) {
+            html += `
+              <div class="list-item resource-item" data-res-id="${escapeHtml(m.id)}">
+                <div class="font-mono font-bold">${escapeHtml(m.id)}</div>
+                <div class="text-muted" style="font-size: 10px;">Provider: ${escapeHtml(m.provider || 'unknown')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const id = el.getAttribute('data-res-id');
+              const item = models.find((m) => m.id === id);
+              uiStore.setState({ selectedResource: { type: 'model', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Models</span></div><div class="text-muted">Models endpoint offline.</div>`;
+        }
+      } else if (nav === 'mcp') {
+        try {
+          const mcp = await getMcp();
+          if (!mcp || mcp.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>MCP Servers (0)</span></div><div class="text-muted">No MCP servers configured.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>MCP Servers (${mcp.length})</span></div>`;
+          for (const m of mcp) {
+            html += `
+              <div class="list-item resource-item" data-res-name="${escapeHtml(m.name)}">
+                <div style="display: flex; justify-content: space-between;">
+                  <strong>${escapeHtml(m.name)}</strong>
+                  <span class="badge ${m.running ? 'badge-ok' : 'badge-kind'}" style="font-size: 9px;">${m.running ? 'running' : 'stopped'}</span>
+                </div>
+                <div class="text-muted font-mono" style="font-size: 10px; margin-top: 2px;">${escapeHtml(m.command || '')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const name = el.getAttribute('data-res-name');
+              const item = mcp.find((m) => m.name === name);
+              uiStore.setState({ selectedResource: { type: 'mcp', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>MCP Servers</span></div><div class="text-muted">MCP endpoint offline.</div>`;
+        }
+      } else if (nav === 'integrations') {
+        sidebarContent.innerHTML = `
+          <div class="sidebar-list-header"><span>Integrations</span></div>
+          <div class="text-muted">No external integrations configured.</div>
+        `;
+      } else if (nav === 'policies') {
+        try {
+          const policies = await getPolicies();
+          if (!policies || policies.length === 0) {
+            sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Policies (0)</span></div><div class="text-muted">No policies registered.</div>`;
+            return;
+          }
+          let html = `<div class="sidebar-list-header"><span>Policies (${policies.length})</span></div>`;
+          for (const p of policies) {
+            const isAllow = p.effect === 'allow';
+            html += `
+              <div class="list-item resource-item" data-res-id="${escapeHtml(p.id)}">
+                <div style="display: flex; justify-content: space-between;">
+                  <strong class="font-mono">${escapeHtml(p.id)}</strong>
+                  <span class="badge ${isAllow ? 'badge-ok' : 'badge-err'}" style="font-size: 9px;">${escapeHtml(p.effect)}</span>
+                </div>
+                <div class="text-muted" style="font-size: 10px; margin-top: 2px;">${escapeHtml(p.reason || p.action || '')}</div>
+              </div>
+            `;
+          }
+          sidebarContent.innerHTML = html;
+          sidebarContent.querySelectorAll('.resource-item').forEach((el) => {
+            el.addEventListener('click', () => {
+              const id = el.getAttribute('data-res-id');
+              const item = policies.find((p) => p.id === id);
+              uiStore.setState({ selectedResource: { type: 'policy', data: item } });
+            });
+          });
+        } catch {
+          sidebarContent.innerHTML = `<div class="sidebar-list-header"><span>Policies</span></div><div class="text-muted">Policies endpoint offline.</div>`;
+        }
+      }
+    }
+
+    // --- Execution Selection & Live Graph Loading ---
+    async function selectExecution(executionId) {
+      if (!executionId) return;
+      executionStore.setState({
+        executionId,
+        status: 'connecting',
+        activeNodes: {},
+        output: null,
+        error: null,
+        artifacts: [],
+        evidence_source: null,
+      });
+
+      const label = document.getElementById('active-task-label');
+      if (label) label.textContent = `Task: ${executionId.slice(0, 8)}…`;
+
+      // Fetch task details for initial output/artifacts/evidence_source
+      try {
+        const task = await getTask(executionId);
+        if (task && executionStore.getState().executionId === executionId) {
+          executionStore.setState({
+            status: task.status || executionStore.getState().status,
+            output: task.output !== undefined && task.output !== null ? task.output : null,
+            error: task.error || null,
+            artifacts: Array.isArray(task.artifacts) ? task.artifacts : [],
+            evidence_source: task.evidence_source || null,
+            workflow: task.workflow || null,
+            task,
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to load task details:', err);
+      }
+
+      // Load REAL graph from /api/executions/{id}/graph
+      try {
+        const previousGraph = canvasStore.getState().graph;
+        const graph = await getExecutionGraph(executionId);
+        if (graph && Array.isArray(graph.nodes)) {
+          canvasStore.setState({ graph, selectedNodeIds: [], selectedEdgeIds: [], error: null });
+          undoStack.push(graph, { actor: 'ai', description: 'Loaded execution graph', previous: previousGraph });
+        } else {
+          canvasStore.setState({ graph: null, selectedNodeIds: [], selectedEdgeIds: [], error: 'Execution graph contains no nodes.' });
+        }
+      } catch (err) {
+        // Honest empty state when 404: NO PLACEHOLDER EVER
+        canvasStore.setState({
+          graph: null,
+          selectedNodeIds: [],
+          selectedEdgeIds: [],
+          error: 'Graph endpoint returned 404: No workflow graph registered for this execution.',
+        });
+      }
+
+      // Connect WebSocket
+      eventStream.connect(executionId);
+
+      // Refresh sidebar if on runs/artifacts
+      const curNav = uiStore.getState().sidebarNav;
+      if (curNav === 'runs' || curNav === 'artifacts') {
+        renderSidebarContent(curNav);
+      }
+    }
+
+    // Clarification follow-up flow (§52)
+    function showClarificationToast(currentInput, question, isProposal = false) {
+      showToast({
+        kind: 'clarify',
+        title: 'Clarification Needed',
+        message: question,
+        input: {
+          placeholder: 'Provide clarification (e.g. example.com)...',
+          submitLabel: 'Answer',
+          onSubmit: async (answerText, toastId) => {
+            const answer = (answerText || '').trim();
+            if (!answer) return;
+            dismissToast(toastId);
+            const combinedInput = `${currentInput}\n${answer}`;
+            if (isProposal) {
+              await handleGenerateProposal(combinedInput);
+            } else {
+              await executeTask(combinedInput);
+            }
+          },
+        },
+        actions: [
+          {
+            label: 'Dismiss',
+            onClick: (toast) => dismissToast(toast.id),
+          },
+        ],
+      });
+    }
+
+    // --- Proposal Generation Flow (§52 Product Directive) ---
+    const btnProposal = document.getElementById('btn-proposal');
+    const taskInput = document.getElementById('task-input');
+    const proposalBannerContainer = document.getElementById('proposal-banner-container');
+
+    async function handleGenerateProposal(overrideInput = null) {
+      const text = (overrideInput !== null ? overrideInput : taskInput?.value || '').trim();
+      if (!text) {
+        taskInput?.focus();
+        taskInput?.classList.add('input-error');
+        showToast({
+          kind: 'error',
+          title: 'Input Required',
+          message: 'Please enter a task description before generating a proposal.',
+          timeoutMs: 4000,
+        });
+        return;
+      }
+
+      btnProposal.disabled = true;
+      btnProposal.textContent = 'Generating…';
+
+      const wsId = uiStore.getState().activeWorkspaceId;
+
+      try {
+        const res = await generateProposal(text, wsId);
+        if (res.status === 'clarification') {
+          showClarificationToast(text, res.question, true);
+        } else if (res.status === 'proposal') {
+          uiStore.setState({ activeProposal: res });
+          if (res.graph && Array.isArray(res.graph.nodes)) {
+            const previousGraph = canvasStore.getState().graph;
+            canvasStore.setState({ graph: res.graph, selectedNodeIds: [], selectedEdgeIds: [], error: null });
+            undoStack.push(res.graph, { actor: 'ai', description: 'Generated proposed graph', previous: previousGraph });
+          }
+          renderProposalBanner(res, text);
+          showToast({ kind: 'info', title: 'Proposal Ready', message: `Proposed workflow: ${res.workflow || res.domain}` });
+        }
+      } catch (err) {
+        showToast({
+          kind: 'error',
+          title: 'Proposal Failed',
+          message: err.message || String(err),
+        });
+      } finally {
+        btnProposal.disabled = false;
+        btnProposal.textContent = 'Generate proposal';
+      }
+    }
+
+    btnProposal?.addEventListener('click', () => handleGenerateProposal());
+
+    function renderProposalBanner(proposal, inputText) {
+      if (!proposalBannerContainer) return;
+      proposalBannerContainer.style.display = 'block';
+
+      const agents = proposal.resources?.agents || [];
+      const tools = proposal.resources?.tools || [];
+      const skills = proposal.resources?.skills || [];
+      const reasoning = Array.isArray(proposal.reasoning) ? proposal.reasoning : [];
+
+      proposalBannerContainer.innerHTML = `
+        <div class="proposal-banner">
+          <div class="proposal-header">
+            <div class="proposal-title">
+              <span class="badge badge-accent">Proposal</span>
+              <strong>${escapeHtml(proposal.workflow || 'Workflow')}</strong>
+              <span class="text-muted">(${escapeHtml(proposal.domain || 'general')})</span>
+            </div>
+            <div class="proposal-actions">
+              <button id="btn-run-proposal" class="btn btn-accent btn-sm">Run Proposal</button>
+              <button id="btn-dismiss-proposal" class="btn btn-sm">Dismiss</button>
+            </div>
+          </div>
+          <div class="proposal-goal"><strong>Goal:</strong> ${escapeHtml(proposal.goal || inputText)}</div>
+          <div class="proposal-details">
+            <div class="proposal-col">
+              <span class="meta-label">Reasoning:</span>
+              <ul class="reasoning-list">
+                ${reasoning.map((r) => `<li>${escapeHtml(r)}</li>`).join('') || '<li>Standard entry match</li>'}
+              </ul>
+            </div>
+            <div class="proposal-col">
+              <span class="meta-label">Resources Needed:</span>
+              <div class="ref-badges" style="margin-top: 4px;">
+                ${agents.map((a) => `<span class="badge badge-kind">Agent: ${escapeHtml(a)}</span>`).join('')}
+                ${tools.map((t) => `<span class="badge badge-warn">Tool: ${escapeHtml(t)}</span>`).join('')}
+                ${skills.map((s) => `<span class="badge badge-accent">Skill: ${escapeHtml(s)}</span>`).join('')}
+                ${agents.length === 0 && tools.length === 0 && skills.length === 0 ? '<span class="text-muted">No external resources</span>' : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      proposalBannerContainer.querySelector('#btn-dismiss-proposal')?.addEventListener('click', () => {
+        proposalBannerContainer.style.display = 'none';
+        uiStore.setState({ activeProposal: null });
+      });
+
+      proposalBannerContainer.querySelector('#btn-run-proposal')?.addEventListener('click', async () => {
+        proposalBannerContainer.style.display = 'none';
+        uiStore.setState({ activeProposal: null });
+        await executeTask(inputText);
+      });
+    }
+
+    // --- Run Execution Flow ---
+    const btnRunTask = document.getElementById('btn-run-task');
+
+    async function executeTask(text) {
+      btnRunTask.disabled = true;
+      btnRunTask.textContent = 'Starting…';
+
+      const wsId = uiStore.getState().activeWorkspaceId;
+
+      try {
+        const result = await createTask(text, 'web-user', wsId);
+        if (result.task_id) {
+          if (taskInput) taskInput.value = '';
+          taskInput?.classList.remove('input-error');
+          if (proposalBannerContainer) proposalBannerContainer.style.display = 'none';
+          uiStore.setState({ activeProposal: null });
+          await selectExecution(result.task_id);
+          // Switch sidebar to runs
+          const btnRunsNav = document.querySelector('[data-nav="runs"]');
+          if (btnRunsNav) btnRunsNav.click();
+        } else if (result.status === 'clarification') {
+          showClarificationToast(text, result.question, false);
+        }
+      } catch (err) {
+        showToast({
+          kind: 'error',
+          title: 'Failed to start task',
+          message: err.message || String(err),
+        });
+      } finally {
+        btnRunTask.disabled = false;
+        btnRunTask.textContent = 'Run';
+      }
+    }
+
+    btnRunTask?.addEventListener('click', () => {
+      const text = taskInput?.value.trim();
+      if (!text) {
+        taskInput?.focus();
+        taskInput?.classList.add('input-error');
+        showToast({
+          kind: 'error',
+          title: 'Input Required',
+          message: 'Please enter a task description before running.',
+          timeoutMs: 4000,
+        });
+        return;
+      }
+      executeTask(text);
+    });
+
+    taskInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const text = taskInput?.value.trim();
+        if (text) executeTask(text);
+      }
+    });
+
+    taskInput?.addEventListener('input', () => {
+      taskInput.classList.remove('input-error');
+    });
+
+    // Update Header Status Badge from executionStore
+    let _lastTerminalRefresh = null;
+    executionStore.subscribe((state) => {
+      const badge = document.getElementById('active-status-badge');
+      if (badge) {
+        badge.textContent = state.status;
+        badge.className = `badge badge-${state.status}`;
+      }
+      // Terminal states: re-fetch the graph so the canvas shows the FINAL
+      // per-node statuses (the durable slice records them in PG; the initial
+      // fetch may have happened while nodes were still pending).
+      if (
+        (state.status === 'completed' || state.status === 'failed') &&
+        state.executionId &&
+        state.executionId !== _lastTerminalRefresh
+      ) {
+        _lastTerminalRefresh = state.executionId;
+        getExecutionGraph(state.executionId)
+          .then((graph) => {
+            if (graph && Array.isArray(graph.nodes)) {
+              canvasStore.setState({ graph });
+            }
+          })
+          .catch(() => {
+            /* keep the last known graph; never fabricate one */
+          });
+      }
+      // If bottom console is on controls tab, update it
+      if (uiStore.getState().consoleTab === 'controls') {
+        renderConsoleTabContent('controls');
+      }
+    });
+
+    // Initial render & bootstrapping
+    (async () => {
+      await loadWorkspaces();
+      await renderSidebarContent('runs');
+      try {
+        const tasks = await listTasks();
+        if (tasks && tasks.length > 0) {
+          await selectExecution(tasks[0].task_id);
+        }
+      } catch (_err) {
+        /* no runs yet — canvas stays ready in honest empty state */
+      }
+    })();
+  </script>
+</body>
+</html>

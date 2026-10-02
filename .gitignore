@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.env
+.uap/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+data/
+.venv-langgraph/
+
+# Impeccable design skill (local tooling, ~20MB engine binary)
+.claude/
