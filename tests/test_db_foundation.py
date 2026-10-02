@@ -90,6 +90,7 @@ EXPECTED_TABLES = {
     "knowledge_items",
     "knowledge_provenance",
     "knowledge_events",
+    "workspaces",
 }
 
 

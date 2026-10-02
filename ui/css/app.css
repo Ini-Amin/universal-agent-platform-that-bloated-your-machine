@@ -1170,3 +1170,407 @@ textarea:focus-visible,
   }
 }
 
+
+/* ==========================================================================
+   Canvas-as-stage (§52/§55). The centre pane hosts real tool views; the node
+   graph becomes a narrow navigation strip on its left. The graph renderer's
+   container stays in the DOM but is hidden (set from index.html) so its
+   selection/zoom logic keeps working without occupying the centre.
+   ========================================================================== */
+
+.canvas-stage-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  position: relative;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* --- Narrow workflow strip (~84px) --- */
+.node-strip {
+  width: 84px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.15s ease;
+}
+
+.node-strip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 6px;
+}
+
+.node-strip-empty {
+  color: var(--fg-muted);
+  font-size: 10px;
+  text-align: center;
+  padding: 12px 2px;
+  line-height: 1.35;
+}
+
+.node-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.node-chip:hover,
+.node-chip:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.node-chip.active {
+  border-color: var(--accent);
+  background: var(--panel-3);
+}
+
+.node-chip-index {
+  font-size: 9px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+
+.node-chip-label {
+  font-size: 10px;
+  line-height: 1.25;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.node-chip-kind {
+  font-size: 9px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* Collapsed strip: zero width, and the left-edge handle becomes the way back. */
+.canvas-stage-area.strip-collapsed .node-strip {
+  width: 0;
+  border-right: none;
+}
+
+/* --- Stage host --- */
+.stage {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+}
+
+.stage-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-content: flex-start;
+  min-height: 100%;
+}
+
+.stage-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex: 1 1 420px;
+  min-width: 280px;
+  max-width: 100%;
+}
+
+.stage-card-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.stage-card-kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.stage-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-card-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.stage-card-close:hover,
+.stage-card-close:focus-visible {
+  color: var(--err);
+  background: var(--panel-3);
+  outline: none;
+}
+
+.stage-card-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+/* --- Markdown --- */
+.stage-markdown {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg);
+  word-wrap: break-word;
+}
+
+.stage-markdown h1,
+.stage-markdown h2,
+.stage-markdown h3,
+.stage-markdown h4 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.stage-markdown h1 { font-size: 18px; }
+.stage-markdown h2 { font-size: 16px; }
+.stage-markdown h3 { font-size: 14px; }
+
+.stage-markdown p { margin: 8px 0; }
+.stage-markdown ul,
+.stage-markdown ol { margin: 8px 0 8px 20px; }
+.stage-markdown li { margin: 2px 0; }
+
+.stage-markdown code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--panel-3);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.stage-markdown .md-pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+
+.stage-markdown .md-pre code {
+  background: none;
+  padding: 0;
+}
+
+.stage-markdown blockquote {
+  border-left: 3px solid var(--border-light);
+  padding-left: 10px;
+  margin: 8px 0;
+  color: var(--fg-muted);
+}
+
+.stage-markdown a { color: var(--accent); }
+.stage-markdown hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.stage-markdown .md-img { max-width: 100%; border-radius: 6px; }
+
+/* --- Media --- */
+.stage-figure { margin: 0; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.stage-image,
+.stage-video {
+  max-width: 100%;
+  border-radius: 6px;
+  background: #000;
+}
+.stage-video { width: 100%; }
+.stage-caption { font-size: 11px; color: var(--fg-muted); }
+.stage-media-error {
+  color: var(--err);
+  font-size: 12px;
+  border: 1px solid var(--err);
+  border-radius: 6px;
+  padding: 10px;
+  background: rgba(248, 81, 73, 0.08);
+}
+
+/* --- iframe / whiteboard --- */
+.stage-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.stage-whiteboard { background: #fff; }
+
+/* --- Code --- */
+.stage-code-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.stage-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.stage-code-lang {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+
+.stage-code-copy {
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.stage-code-copy:hover { border-color: var(--accent); }
+
+.stage-pre {
+  margin: 0;
+  padding: 10px;
+  background: var(--bg);
+  overflow-x: auto;
+}
+
+.stage-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--fg);
+}
+
+/* --- Placeholder (never fail silently) --- */
+.stage-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  padding: 28px 16px;
+  color: var(--fg-muted);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  min-height: 160px;
+}
+
+.stage-placeholder-error { border-color: var(--warn); color: var(--warn); }
+.stage-placeholder-icon { font-size: 22px; opacity: 0.7; }
+.stage-placeholder-title { font-size: 13px; font-weight: 600; color: var(--fg); }
+.stage-placeholder-message { font-size: 12px; max-width: 420px; line-height: 1.5; }
+
+/* --- Left-edge `>` reveal handle: fullscreen + collapsed only --- */
+.strip-reveal {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to right, rgba(88, 166, 255, 0.18), transparent);
+  border: none;
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 30;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.strip-reveal:hover,
+.strip-reveal:focus-visible { opacity: 1; outline: none; }
+
+body.stage-fullscreen .canvas-stage-area.strip-collapsed .strip-reveal { display: flex; }
+
+/* Floating exit control, only while the stage is fullscreen. */
+.stage-exit-fs {
+  display: none;
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 40;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.stage-exit-fs:hover { border-color: var(--accent); }
+body.stage-fullscreen .stage-exit-fs { display: block; }
+
+/* Fullscreen element is the stage area itself. */
+.canvas-stage-area:fullscreen { background: var(--bg); }
+.canvas-stage-area:-webkit-full-screen { background: var(--bg); }
+
+/* Phone: the strip stays but the stage takes the width. */
+@media (max-width: 560px) {
+  .node-strip { width: 64px; }
+  .stage { padding: 8px; }
+  .stage-card { flex-basis: 100%; min-width: 0; }
+}

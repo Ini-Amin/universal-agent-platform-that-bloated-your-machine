@@ -25,6 +25,7 @@ from uap.db.models.knowledge import (
     KnowledgeProvenanceRow,
 )
 from uap.db.models.trace import DecisionTraceRow
+from uap.db.models.workspace import WorkspaceRow
 
 __all__ = [
     "AgentDefinition",
@@ -44,4 +45,5 @@ __all__ = [
     "VersionStatus",
     "WorkflowDefinition",
     "WorkflowVersion",
+    "WorkspaceRow",
 ]

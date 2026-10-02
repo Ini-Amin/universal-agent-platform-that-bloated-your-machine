@@ -83,8 +83,15 @@ def _load_workspace_model() -> object:
     )
 
 
-def _load_workspace_repository() -> object | None:
-    """Resolve an optional WorkspaceRepository, or ``None`` when absent."""
+def _load_workspace_repository(session: object | None = None) -> object | None:
+    """Resolve an optional WorkspaceRepository instance, or ``None``.
+
+    ``WorkspaceRepository`` follows the ``uap.db`` convention: it is
+    constructed with the shared :class:`Session`. The discovered class is
+    therefore *instantiated* here (when a session is available) rather than
+    returned as a bare class -- returning the class made every delegated call
+    fail with ``missing 1 required positional argument: 'workspace'``.
+    """
     for module_path, attr in (
         ("uap.db.repositories", "WorkspaceRepository"),
         ("uap.db", "WorkspaceRepository"),
@@ -94,8 +101,24 @@ def _load_workspace_repository() -> object | None:
         except ImportError:
             continue
         repository = getattr(module, attr, None)
-        if repository is not None:
-            return repository
+        if repository is None:
+            continue
+        if session is not None:
+            try:
+                return repository(session)
+            except TypeError:
+                # A repository whose constructor does not take a session.
+                # Returning the bare CLASS here was a real defect: every
+                # delegated call then failed with "missing 1 required
+                # positional argument: 'workspace'" because the class was
+                # never instantiated and `self` was never bound.
+                # Try a no-arg construction instead, and only fall back to
+                # the class when even that fails.
+                try:
+                    return repository()
+                except TypeError:
+                    return None
+        return None
     return None
 
 
@@ -122,7 +145,7 @@ class WorkspaceStore:
             self._repo = None
             self._model = model
         else:
-            self._repo = _load_workspace_repository()
+            self._repo = _load_workspace_repository(session)
             # Resolve the ORM model eagerly so a missing uap.db fails here, with
             # the clear message above, rather than halfway through a write.
             self._model = None if self._repo is not None else _load_workspace_model()

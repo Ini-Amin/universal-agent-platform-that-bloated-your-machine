@@ -812,7 +812,12 @@ class PlatformSlice:
                 workspace_id=workspace.id,
             )
             out.execution_id = execution_id
-            await Worker(service).run_once()
+            # Run THIS execution. `run_once()` claims the OLDEST pending row,
+            # so a synchronous caller that just enqueued its own work ran the
+            # PREVIOUS submission instead and returned a report attributed to
+            # the wrong task — verified: two back-to-back requests received
+            # each other's output (2026-10-03).
+            await Worker(service).run_specific(execution_id)
             status = service.status(execution_id)
             out.execution_status = status.get("status", "")
         except Exception as exc:

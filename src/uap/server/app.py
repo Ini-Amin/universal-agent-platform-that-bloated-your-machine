@@ -116,6 +116,17 @@ class WorkspaceCreateRequest(BaseModel):
     name: str
     description: str | None = None
 
+class WorkspaceFromTemplateRequest(BaseModel):
+    """Body of ``POST /api/workspaces/from-template``.
+
+    ``template`` is a catalog template name; ``input`` is the user's request in
+    the shape the template documents (see ``GET /api/templates/{name}``).
+    """
+
+    template: str
+    input: str = ""
+    user_id: str | None = None
+
 class DecisionRequest(BaseModel):
     """Body of ``POST /approvals/{approval_id}/decide``."""
 
@@ -967,9 +978,21 @@ def create_app(
         """Old single-page UI (canvas IDE is the primary UI at /)."""
         return FileResponse(_INDEX_HTML, media_type="text/html")
 
-    @app.post("/tasks")
-    async def create_task(body: TaskRequest) -> dict[str, Any]:
-        outcome = entry.run(UserRequest(raw_input=body.input, user_id=body.user_id))
+    async def _start_task(
+        raw_input: str,
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Entry -> Router -> workflow -> dispatch; return the task payload.
+
+        Shared by ``POST /tasks`` and ``POST /api/workspaces/from-template`` so
+        a template-started run passes through exactly the same gate as a manual
+        one: no duplicated routing, no second execution path. Returns either
+        ``{"status": "clarification", "question": ...}`` or the accepted-task
+        payload.
+        """
+        outcome = entry.run(UserRequest(raw_input=raw_input, user_id=user_id))
         if outcome.needs_clarification or outcome.spec is None:
             return {"status": "clarification", "question": outcome.question}
 
@@ -1000,8 +1023,8 @@ def create_app(
             task_id=spec.task_id,
             domain=decision.domain,
             workflow=decision.workflow_name or RESEARCH_WORKFLOW_NAME,
-            input=body.input,
-            workspace_id=body.workspace_id,
+            input=raw_input,
+            workspace_id=workspace_id,
         )
         runs[spec.task_id] = record
         get_control(spec.task_id)  # register run-control gate
@@ -1016,13 +1039,13 @@ def create_app(
         )
         if use_slice:
             if run_inline:
-                await _execute_slice(record, body.input, body.user_id, spec, workflow)
+                await _execute_slice(record, raw_input, user_id, spec, workflow)
             else:
                 # Hold a strong reference: the event loop only keeps a weak one,
                 # so a bare create_task() can be garbage-collected mid-run and
                 # the task would silently vanish (CPython asyncio docs).
                 task = asyncio.create_task(
-                    _execute_slice(record, body.input, body.user_id, spec, workflow)
+                    _execute_slice(record, raw_input, user_id, spec, workflow)
                 )
                 app.state.background.add(task)
                 task.add_done_callback(app.state.background.discard)
@@ -1041,6 +1064,12 @@ def create_app(
             "workspace_id": record.workspace_id,
             "evidence_source": record.evidence_source,
         }
+
+    @app.post("/tasks")
+    async def create_task(body: TaskRequest) -> dict[str, Any]:
+        return await _start_task(
+            body.input, user_id=body.user_id, workspace_id=body.workspace_id
+        )
 
     @app.get("/tasks")
     async def list_tasks() -> list[dict[str, Any]]:
@@ -1679,6 +1708,17 @@ def create_app(
 
     # -- /api/workspaces ------------------------------------------------- #
 
+    def _workspace_json(ws: Any) -> dict[str, Any]:
+        """The public workspace representation shared by every workspace route."""
+        return {
+            "id": str(ws.id),
+            "name": ws.name,
+            "description": ws.description or "",
+            "status": str(ws.status),
+            "created_at": ws.created_at.isoformat() if ws.created_at else None,
+            "default_workflow_refs": ws.default_workflow_refs or [],
+        }
+
     @app.get("/api/workspaces")
     async def list_workspaces() -> list[dict[str, Any]]:
         try:
@@ -1687,17 +1727,7 @@ def create_app(
             with session_scope() as session:
                 store = WorkspaceStore(session=session)
                 items = store.list()
-                return [
-                    {
-                        "id": str(ws.id),
-                        "name": ws.name,
-                        "description": ws.description or "",
-                        "status": str(ws.status),
-                        "created_at": ws.created_at.isoformat() if ws.created_at else None,
-                        "default_workflow_refs": ws.default_workflow_refs or [],
-                    }
-                    for ws in items
-                ]
+                return [_workspace_json(ws) for ws in items]
         except Exception as exc:
             log_swallowed_exception(
                 logger,
@@ -1717,14 +1747,7 @@ def create_app(
                 store = WorkspaceStore(session=session)
                 ws = store.create(Workspace(id=str(uuid.uuid4()), name=body.name, description=body.description or ""))
                 session.commit()
-                return {
-                    "id": str(ws.id),
-                    "name": ws.name,
-                    "description": ws.description or "",
-                    "status": str(ws.status),
-                    "created_at": ws.created_at.isoformat() if ws.created_at else None,
-                    "default_workflow_refs": ws.default_workflow_refs or [],
-                }
+                return _workspace_json(ws)
         except Exception as exc:
             log_swallowed_exception(
                 logger,
@@ -1734,6 +1757,110 @@ def create_app(
                 name=body.name,
             )
             raise HTTPException(status_code=503, detail=f"workspace creation failed: {redact_text(str(exc))}")
+
+    # -- /api/templates -------------------------------------------------- #
+
+    @app.get("/api/templates")
+    async def list_templates() -> list[dict[str, Any]]:
+        """The grouped template catalog (ComfyUI shape).
+
+        Data only -- no database, no execution. Every template maps to a
+        workflow that can run today; see :mod:`uap.templates.catalog`.
+        """
+        from uap.templates import catalog
+
+        return catalog()
+
+    @app.get("/api/templates/{name}")
+    async def get_template(name: str) -> dict[str, Any]:
+        """One template, with the workflow it maps to and the input shape."""
+        from uap.templates import template_detail
+
+        detail = template_detail(name)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"unknown template {name!r}")
+        return detail
+
+    @app.post("/api/workspaces/from-template")
+    async def create_workspace_from_template(
+        body: WorkspaceFromTemplateRequest,
+    ) -> dict[str, Any]:
+        """Create a workspace from a template AND start its task.
+
+        Returns both the workspace and the started task (or the clarification
+        question when the input could not be routed) so the UI can go straight
+        to the canvas. The task runs through exactly the same gate as
+        ``POST /tasks`` -- this endpoint does not add a second execution path.
+        """
+        from uap.templates import template_detail
+
+        detail = template_detail(body.template)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"unknown template {body.template!r}")
+
+        if not body.input or not body.input.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "input is required; the template documents the shape at "
+                    f"GET /api/templates/{body.template}"
+                ),
+            )
+
+        workflow_ref = detail["workflow"]["workflow_ref"]
+
+        # 1. Create the workspace, pinned to the template's workflow ref.
+        try:
+            from uap.workspace.store import WorkspaceStore
+            from uap.workspace.model import Workspace
+            from uap.db.engine import session_scope
+
+            with session_scope() as session:
+                store = WorkspaceStore(session=session)
+                ws = store.create(
+                    Workspace(
+                        id=str(uuid.uuid4()),
+                        name=detail["title"],
+                        description=detail["description"],
+                        settings={
+                            "template": body.template,
+                            "tags": list(detail["tags"]),
+                        },
+                        default_workflow_refs=[workflow_ref],
+                    )
+                )
+                workspace_json = _workspace_json(ws)
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "workspace creation from template failed",
+                level=logging.ERROR,
+                template=body.template,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"workspace creation failed: {redact_text(str(exc))}",
+            )
+
+        # 2. Start the task, bound to the new workspace.
+        task = await _start_task(
+            body.input, user_id=body.user_id, workspace_id=workspace_json["id"]
+        )
+        if task.get("status") == "clarification":
+            return {
+                "template": body.template,
+                "workspace": workspace_json,
+                "task": None,
+                "status": "clarification",
+                "question": task.get("question"),
+            }
+        return {
+            "template": body.template,
+            "workspace": workspace_json,
+            "task": task,
+            "status": task.get("status", "accepted"),
+        }
 
     # -- /api/tasks/{task_id}/artifacts ---------------------------------- #
 

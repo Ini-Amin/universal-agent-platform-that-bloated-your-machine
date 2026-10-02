@@ -25,7 +25,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -43,11 +43,13 @@ from uap.db.models.definitions import (
     WorkflowVersion,
 )
 from uap.db.models.execution import Execution, ExecutionEvent, ExecutionStatus
+from uap.db.models.workspace import WorkspaceRow
 
 __all__ = [
     "DefinitionRepository",
     "EventRepository",
     "ExecutionRepository",
+    "WorkspaceRepository",
     "canonical_json",
     "compute_content_hash",
 ]
@@ -514,3 +516,81 @@ class EventRepository:
             ExecutionEvent.execution_id == execution_id
         )
         return int(self._session.execute(stmt).scalar_one())
+
+
+# --------------------------------------------------------------------------- #
+# Workspaces (Master section 3)
+# --------------------------------------------------------------------------- #
+
+class WorkspaceRepository:
+    """CRUD for ``workspaces`` rows (Master section 3).
+
+    Implements the interface :class:`~uap.workspace.store.WorkspaceStore`
+    discovers and documents (``create/get/list/update/delete``). Like every
+    repository here it **flushes, never commits** -- the caller's
+    :func:`~uap.db.engine.session_scope` owns the transaction.
+
+    Rows are returned as :class:`~uap.db.models.workspace.WorkspaceRow`; the
+    store converts them to its value object. This module stays free of any
+    ``uap.workspace`` import, keeping the layering one-directional (``uap.db``
+    must not depend on higher-level packages).
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, workspace: Any) -> WorkspaceRow:
+        """Insert ``workspace`` (a value object) and flush."""
+        row = WorkspaceRow(
+            id=str(getattr(workspace, "id")),
+            name=str(getattr(workspace, "name")),
+            description=str(getattr(workspace, "description", "") or ""),
+            root_path=str(getattr(workspace, "root_path", "") or ""),
+            status=_status_text(getattr(workspace, "status", "active")),
+            created_at=getattr(workspace, "created_at", None),
+            updated_at=getattr(workspace, "updated_at", None),
+            settings=dict(getattr(workspace, "settings", None) or {}),
+            default_workflow_refs=list(
+                getattr(workspace, "default_workflow_refs", None) or []
+            ),
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def get(self, workspace_id: str) -> WorkspaceRow | None:
+        return self._session.get(WorkspaceRow, str(workspace_id))
+
+    def list(self) -> Sequence[WorkspaceRow]:
+        stmt = select(WorkspaceRow).order_by(WorkspaceRow.created_at.desc())
+        return list(self._session.execute(stmt).scalars().all())
+
+    def update(self, workspace: Any) -> WorkspaceRow:
+        row = self.get(getattr(workspace, "id"))
+        if row is None:
+            raise KeyError(f"no workspace with id {getattr(workspace, 'id')!r}")
+        row.name = str(getattr(workspace, "name"))
+        row.description = str(getattr(workspace, "description", "") or "")
+        row.root_path = str(getattr(workspace, "root_path", "") or "")
+        row.status = _status_text(getattr(workspace, "status", "active"))
+        row.settings = dict(getattr(workspace, "settings", None) or {})
+        row.default_workflow_refs = list(
+            getattr(workspace, "default_workflow_refs", None) or []
+        )
+        row.updated_at = datetime.now(timezone.utc)
+        self._session.flush()
+        return row
+
+    def delete(self, workspace_id: str) -> bool:
+        """Soft-delete: mark ``status='deleted'``. ``True`` when a row changed."""
+        row = self.get(workspace_id)
+        if row is None:
+            return False
+        row.status = "deleted"
+        row.updated_at = datetime.now(timezone.utc)
+        self._session.flush()
+        return True
+
+def _status_text(value: Any) -> str:
+    """Render a ``StrEnum``/string status as its plain string value."""
+    return str(getattr(value, "value", value))

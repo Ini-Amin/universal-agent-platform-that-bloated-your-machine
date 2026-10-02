@@ -110,13 +110,33 @@
             <button id="btn-zoom-out" class="btn" title="Zoom Out">-</button>
             <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
             <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
+            <span class="toolbar-sep"></span>
+            <button id="btn-toggle-strip" class="btn" title="Hide the workflow strip">Strip</button>
+            <button id="btn-fullscreen-stage" class="btn" title="Fullscreen the stage">Fullscreen</button>
           </div>
         </div>
 
         <!-- Proposal Panel (§52 directive) -->
         <div id="proposal-banner-container" style="display: none;"></div>
 
-        <div id="graph-canvas-container" class="canvas-viewport-container"></div>
+        <!-- Canvas-as-stage: the centre hosts real tool views; the workflow
+             graph becomes a narrow navigation strip. The collapse handle only
+             appears when the stage is fullscreen (left edge hover). -->
+        <div class="canvas-stage-area">
+          <button id="strip-reveal" class="strip-reveal" type="button"
+                  aria-label="Show workflow strip" title="Show workflow strip">›</button>
+          <button id="btn-exit-fullscreen" class="stage-exit-fs" type="button" title="Exit fullscreen">Exit fullscreen</button>
+          <aside id="node-strip" class="node-strip" aria-label="Workflow nodes">
+            <div id="node-strip-list" class="node-strip-list">
+              <div class="node-strip-empty">No workflow yet</div>
+            </div>
+          </aside>
+          <div id="stage" class="stage" aria-label="Stage"></div>
+        </div>
+
+        <!-- The node graph renderer still owns this element; it is kept off
+             screen so node selection/zoom logic keeps working. -->
+        <div id="graph-canvas-container" class="canvas-viewport-container" aria-hidden="true"></div>
       </main>
 
       <!-- 3. Right Inspector Pane (§52/§53) -->
@@ -170,6 +190,7 @@
     import { canvasStore, executionStore, eventStore, uiStore } from './js/state.js';
     import { createUndoStack } from './js/undo.js';
     import { initGraphCanvas } from './js/graph-canvas.js';
+    import { createStage } from './js/stage.js';
     import { initInspector } from './js/inspector.js';
     import { createEventStream, initEventConsole } from './js/event-stream.js';
     import {
@@ -258,6 +279,118 @@
         updateUndoButtons();
       },
     });
+
+    // Initialize the Stage (§52/§55 canvas-as-stage). The centre hosts real
+    // tool views; the graph above becomes a narrow navigation strip.
+    const stageEl = document.getElementById('stage');
+    const stage = createStage(stageEl);
+    const stripEl = document.getElementById('node-strip');
+    const stripListEl = document.getElementById('node-strip-list');
+    const stripRevealEl = document.getElementById('strip-reveal');
+    const stageAreaEl = document.querySelector('.canvas-stage-area');
+
+    let stripCollapsed = false;
+
+    function setStripCollapsed(collapsed) {
+      stripCollapsed = Boolean(collapsed);
+      stageAreaEl?.classList.toggle('strip-collapsed', stripCollapsed);
+      if (stripRevealEl) {
+        stripRevealEl.setAttribute('aria-expanded', stripCollapsed ? 'false' : 'true');
+        stripRevealEl.title = stripCollapsed ? 'Show workflow strip' : 'Hide workflow strip';
+      }
+    }
+
+    // The graph renderer still owns #graph-canvas-container; keep it off screen
+    // so its node/zoom logic keeps working without occupying the centre.
+    if (canvasContainer) canvasContainer.style.display = 'none';
+
+    function renderNodeStrip(graph) {
+      if (!stripListEl) return;
+      const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
+      if (nodes.length === 0) {
+        stripListEl.innerHTML = '<div class="node-strip-empty">No workflow yet</div>';
+        return;
+      }
+      const selected = canvasStore.getState().selectedNodeIds || [];
+      stripListEl.innerHTML = nodes.map((n, idx) => `
+        <button class="node-chip${selected.includes(n.id) ? ' active' : ''}" type="button" data-node-id="${escapeHtml(n.id)}"
+                title="${escapeHtml(n.label || n.id)}">
+          <span class="node-chip-index">${idx + 1}</span>
+          <span class="node-chip-label">${escapeHtml(n.label || n.id)}</span>
+          <span class="node-chip-kind">${escapeHtml(n.kind || '')}</span>
+        </button>
+      `).join('');
+      stripListEl.querySelectorAll('.node-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          const nodeId = chip.getAttribute('data-node-id');
+          const node = nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          // Selecting re-renders the strip (which derives the active chip), so
+          // no manual class toggle is needed here.
+          canvasStore.setState({ selectedNodeIds: [node.id], selectedEdgeIds: [] });
+          stage.showView({
+            kind: 'placeholder',
+            id: `node:${node.id}`,
+            title: node.label || node.id,
+            message: `Node "${node.label || node.id}" (${node.kind || 'node'}) — its live process view is not wired up yet. This placeholder stands in for it.`,
+          });
+        });
+      });
+    }
+
+    canvasStore.subscribe((state) => renderNodeStrip(state.graph));
+    renderNodeStrip(canvasStore.getState().graph);
+
+    // Collapse / expand the workflow strip.
+    document.getElementById('btn-toggle-strip')?.addEventListener('click', () => setStripCollapsed(!stripCollapsed));
+    stripRevealEl?.addEventListener('click', () => setStripCollapsed(false));
+
+    // Fullscreen: the stage fills the screen. On entering, the strip is
+    // collapsed so the left-edge `>` handle is the way back.
+    const btnFullscreen = document.getElementById('btn-fullscreen-stage');
+    const btnExitFullscreen = document.getElementById('btn-exit-fullscreen');
+    const fsTarget = stageAreaEl;
+
+    function requestStageFullscreen() {
+      const doc = document;
+      const inFs = doc.fullscreenElement || doc.webkitFullscreenElement;
+      if (inFs) {
+        (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
+        return;
+      }
+      const req = fsTarget?.requestFullscreen || fsTarget?.webkitRequestFullscreen;
+      if (!req) {
+        showToast({ kind: 'warn', title: 'Fullscreen unavailable', message: 'This browser did not grant a fullscreen request.' });
+        return;
+      }
+      Promise.resolve(req.call(fsTarget)).catch((err) => {
+        showToast({ kind: 'warn', title: 'Fullscreen blocked', message: err?.message || String(err) });
+      });
+    }
+
+    btnFullscreen?.addEventListener('click', requestStageFullscreen);
+    btnExitFullscreen?.addEventListener('click', () => {
+      const doc = document;
+      (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
+    });
+
+    function handleFullscreenChange() {
+      const doc = document;
+      const active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+      document.body.classList.toggle('stage-fullscreen', active);
+      if (btnFullscreen) btnFullscreen.textContent = active ? 'Exit' : 'Fullscreen';
+      // Entering fullscreen collapses the strip so the left-edge `>` handle is
+      // the way back; leaving restores the normal strip.
+      setStripCollapsed(active);
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+    // Expose for console testing and for other modules (node views, portals).
+    window.UAP = window.UAP || {};
+    window.UAP.stage = stage;
+    window.UAP.showView = (spec) => stage.showView(spec);
+    window.UAP.setStripCollapsed = setStripCollapsed;
 
     // Initialize Inspector (§53)
     const inspectorContainer = document.getElementById('inspector-content');
