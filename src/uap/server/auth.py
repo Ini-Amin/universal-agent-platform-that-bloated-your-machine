@@ -26,9 +26,11 @@ import os
 import re
 import secrets
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from starlette.exceptions import WebSocketException
-from starlette.requests import HTTPConnection
+from starlette.requests import HTTPConnection, Request
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 __all__ = [
@@ -36,6 +38,7 @@ __all__ = [
     "auth_enabled",
     "require_token",
     "is_exempt",
+    "guard_fastapi_builtin_routes",
     "close_unauthorized_websocket",
     "scrub_token_from_logs",
     "EXEMPT_PREFIXES",
@@ -50,6 +53,9 @@ EXEMPT_PREFIXES: tuple[str, ...] = ("/js/", "/css/", "/legacy")
 _EXEMPT_PATHS: frozenset[str] = frozenset({"/", "/index.html"})
 
 _WS_TOKEN_PARAM = "token"
+
+#: Set once :func:`guard_fastapi_builtin_routes` has patched ``FastAPI.setup``.
+_BUILTIN_ROUTES_GUARDED = False
 
 
 def api_token() -> str | None:
@@ -114,6 +120,68 @@ async def require_token(conn: HTTPConnection) -> None:
     if conn.scope.get("type") == "websocket":
         raise WebSocketException(code=1008, reason="unauthorized")
     raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _token_gated(app: ASGIApp) -> ASGIApp:
+    """Wrap an ASGI app with the very check :func:`require_token` runs.
+
+    Reuses :func:`_presented` / :func:`_matches` / :func:`is_exempt`, so the
+    module keeps exactly one definition of "does this request carry the
+    token", and answers with the same 401 body.
+    """
+
+    async def gated(scope: Scope, receive: Receive, send: Send) -> None:
+        expected = api_token()
+        if expected is None or scope["type"] != "http" or is_exempt(scope["path"]):
+            await app(scope, receive, send)
+            return
+        if _matches(expected, _presented(Request(scope, receive))):
+            await app(scope, receive, send)
+            return
+        denial = JSONResponse({"detail": "unauthorized"}, status_code=401)
+        await denial(scope, receive, send)
+
+    return gated
+
+
+def guard_fastapi_builtin_routes() -> None:
+    """Put the token gate on ``/openapi.json``, ``/docs`` and ``/redoc``.
+
+    Those three -- plus ``/docs/oauth2-redirect`` -- are registered by
+    ``FastAPI.setup`` as plain Starlette routes, so the app-level
+    ``Depends(require_token)`` never runs for them: with ``UAP_API_TOKEN``
+    set, ``GET /openapi.json`` still handed every route and request schema to
+    an anonymous caller. They were never exempt, only *unreachable* by the
+    dependency, so the gate is applied where they are registered instead.
+
+    ``ponytail:`` this patches ``FastAPI.setup``, a third-party class, for the
+    whole process; only apps that declared :func:`require_token` as a router
+    dependency are wrapped, so other FastAPI apps here are untouched. If the
+    app factory ever grows a middleware slot, move this to
+    ``app.add_middleware(...)`` in ``create_app`` and delete this function.
+    """
+    global _BUILTIN_ROUTES_GUARDED
+    if _BUILTIN_ROUTES_GUARDED:
+        return
+    original_setup = FastAPI.setup
+
+    def setup(self: FastAPI) -> None:
+        known = {id(route) for route in self.router.routes}
+        original_setup(self)
+        opted_in = any(
+            getattr(dep, "dependency", None) is require_token
+            for dep in getattr(self.router, "dependencies", ())
+        )
+        if opted_in:
+            for route in self.router.routes:
+                if id(route) not in known:  # a built-in this call just added
+                    route.app = _token_gated(route.app)
+
+    FastAPI.setup = setup
+    _BUILTIN_ROUTES_GUARDED = True
+
+
+guard_fastapi_builtin_routes()
 
 
 async def close_unauthorized_websocket(

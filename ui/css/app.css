@@ -71,6 +71,20 @@ body {
   gap: 10px;
 }
 
+/* AGPL-3.0 §13 source offer. Muted so it never competes with run status. */
+.source-link {
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.source-link:hover,
+.source-link:focus-visible {
+  color: var(--accent);
+}
+
 /* 3-Pane Body */
 .ide-body {
   display: flex;
@@ -217,7 +231,8 @@ body {
 
 .meta-value {
   color: var(--fg);
-  word-break: break-all;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ports-block h4, .config-block h4 {
@@ -522,6 +537,7 @@ input[type="text"].input-error {
 .artifact-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -533,7 +549,10 @@ input[type="text"].input-error {
 .artifact-link {
   color: var(--accent);
   text-decoration: none;
-  word-break: break-all;
+  /* NOT word-break: break-all: it makes min-content width a single character,
+     letting flex/grid shrink the path to 1ch (vertical text). `anywhere` still
+     breaks long paths but only at line ends. */
+  overflow-wrap: anywhere;
 }
 
 .artifact-link:hover {
@@ -542,8 +561,9 @@ input[type="text"].input-error {
 
 .artifact-uri {
   color: var(--fg);
-  word-break: break-all;
-  flex: 1;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-width: 12ch;
   font-size: 11px;
 }
 
@@ -1014,6 +1034,75 @@ textarea:focus-visible,
   }
   .workspace-label {
     display: none;
+  }
+}
+
+/* Phone. The three fixed-width panes cannot fit side by side in ~390px, so
+   the layout stacks: the canvas keeps the top half, the sidebar and inspector
+   share the bottom. Measured before this rule: scrollWidth 534 vs clientWidth
+   390 (144px of horizontal overflow, verified in a real browser 2026-10-03). */
+@media (max-width: 560px) {
+  .ide-container {
+    width: 100%;          /* 100vw includes the scrollbar and overflows */
+    overflow-x: hidden;
+  }
+  .ide-header {
+    height: auto;
+    min-height: 42px;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .ide-header .logo span {
+    display: none;        /* "Visual Operating Environment" — noise at 390px */
+  }
+  .header-status {
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+  .workspace-picker {
+    flex-wrap: wrap;
+  }
+  .ide-body {
+    flex-direction: column;
+  }
+  .pane-sidebar,
+  .pane-inspector {
+    width: 100%;
+    max-width: 100%;
+    flex: 0 0 auto;
+    max-height: 30vh;
+    border-left: none;
+    border-right: none;
+    border-top: 1px solid var(--border);
+  }
+  .pane-canvas {
+    flex: 1 1 auto;
+    min-height: 40vh;
+    width: 100%;
+  }
+  .canvas-toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 6px 8px;
+  }
+  /* These two are the actual overflow sources at 390px (measured with
+     getBoundingClientRect: .toolbar-group 421px, .header-status 228px in a
+     390px viewport). Both are plain flex rows with no wrap, so their children
+     push the document wider than the screen. */
+  .toolbar-group,
+  .header-status {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .header-status {
+    font-size: 11px;
+  }
+  /* Nothing may push the page wider than the viewport. */
+  .pane-sidebar *,
+  .pane-inspector * {
+    max-width: 100%;
   }
 }
 

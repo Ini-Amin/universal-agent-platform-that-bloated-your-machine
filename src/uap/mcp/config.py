@@ -57,6 +57,17 @@ class MCPServerConfig(BaseModel):
                 raise ValueError(f"risk tier for {tool!r} must be 0-3, got {tier!r}")
         return value
 
+    @property
+    def command_display(self) -> str:
+        """Binary name only -- what an API caller may see.
+
+        ``command`` is where the operator's server actually lives (an absolute
+        host path by default), so returning it verbatim from
+        ``/api/resources/mcp`` publishes the host's directory layout to anyone
+        who can reach the port. Launch still uses :attr:`command`.
+        """
+        return os.path.basename(self.command) if self.command else ""
+
 
 # --------------------------------------------------------------------------- #
 # bugbounty-mcp: the first real MCP server wired into UAP.

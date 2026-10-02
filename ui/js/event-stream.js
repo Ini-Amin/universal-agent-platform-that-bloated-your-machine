@@ -42,6 +42,13 @@ export function createEventStream() {
     if (ws) {
       disconnect();
     }
+    // A new execution means a new log: without this, events from the previous
+    // run stayed in the ring buffer and the panel showed two runs interleaved
+    // (and, with the old append-only code, the same run three times over).
+    if (currentExecutionId !== executionId) {
+      lastSeenSeq = 0;
+      eventStore.setState({ events: [] });
+    }
     currentExecutionId = executionId;
     manuallyClosed = false;
     setStatus('connecting');
@@ -142,6 +149,12 @@ export function createEventStream() {
       lastSeenSeq = Math.max(lastSeenSeq, seq);
 
       eventStore.setState((s) => {
+        // Deduplicate by seq. A reconnect issues `resync {after_seq}` and the
+        // server may also replay from an earlier point, so the same event can
+        // arrive more than once. Without this, every reconnect multiplied the
+        // visible log (observed live: each event rendered 3x).
+        const existing = new Set(s.events.map((e) => e.seq));
+        if (existing.has(seq)) return {};
         const nextEvents = [...s.events, { ...ev, seq }];
         if (nextEvents.length > s.max) {
           nextEvents.splice(0, nextEvents.length - s.max);

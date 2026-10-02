@@ -1034,7 +1034,14 @@ def create_app(
 
     @app.get("/tasks")
     async def list_tasks() -> list[dict[str, Any]]:
-        return [record.summary() for record in runs.values()]
+        # A run may be registered under several keys (task_id, execution_id,
+        # pre-rewrite task_id) pointing at the SAME RunRecord. Deduplicate by
+        # object identity so each logical run is listed exactly once; the
+        # aliases are kept in the registry for WS/route lookups.
+        seen: dict[int, RunRecord] = {}
+        for record in runs.values():
+            seen.setdefault(id(record), record)
+        return [record.summary() for record in seen.values()]
 
     @app.get("/tasks/{task_id}")
     async def get_task(task_id: str) -> dict[str, Any]:
@@ -1630,7 +1637,9 @@ def create_app(
         mcp_running = getattr(app.state, "mcp_client", None) is not None
         return [{
             "name": cfg.name,
-            "command": cfg.command,
+            # Only the binary name: ``cfg.command`` is the operator's real
+            # absolute host path, and echoing it publishes the host layout.
+            "command": cfg.command_display,
             "tools": sorted(cfg.tier_map.keys()),
             "running": mcp_running,
         }]
@@ -1829,6 +1838,26 @@ def create_app(
     # above wins; only unmatched paths (/, /js/*, /css/*) fall through to it.
     if _UI_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(_UI_DIR), html=True), name="root-ui")
+
+        @app.middleware("http")
+        async def _no_store_ui_assets(request: Request, call_next: Any) -> Any:
+            """Serve UI assets with ``no-cache`` so an update is never hidden.
+
+            The UI is mounted as plain static files with relative URLs
+            (``css/app.css``, ``./js/*.js``). A browser that cached them kept
+            rendering the PREVIOUS build after a fix landed — a stale CSS file
+            made a verified layout fix look broken during a live review
+            (2026-10-03). ``no-cache`` still allows a cached copy; it just forces
+            revalidation, so the ETag keeps it cheap while never going stale.
+            """
+            response = await call_next(request)
+            path = request.url.path
+            if (
+                path == "/"
+                or path.endswith((".js", ".css", ".html"))
+            ):
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
 
     return app
 

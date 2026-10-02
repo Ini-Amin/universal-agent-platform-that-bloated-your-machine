@@ -24,6 +24,12 @@
         <span id="active-task-label" class="font-mono text-muted">No task selected</span>
         <span id="active-status-badge" class="badge">idle</span>
         <span id="ws-status-badge" class="badge badge-idle" title="Live execution stream connection">stream: idle</span>
+        <!-- AGPL-3.0 section 13: users interacting with this software over a
+             network must be offered a way to obtain its source. -->
+        <a id="source-link" class="source-link"
+           href="https://github.com/Ini-Amin/universal-agent-platform-that-bloated-your-machine"
+           target="_blank" rel="noopener noreferrer"
+           title="Source code (AGPL-3.0)">Source</a>
       </div>
     </header>
 
@@ -1163,6 +1169,14 @@
           .catch(() => {
             /* keep the last known graph; never fabricate one */
           });
+        // The run list is fetched from GET /tasks, so it still shows the
+        // pre-run status until something re-renders it. Without this the
+        // sidebar said "running" while the header badge already said
+        // "completed" (observed live, 2026-10-03).
+        const curNav = uiStore.getState().sidebarNav;
+        if (curNav === 'runs' || curNav === 'artifacts') {
+          renderSidebarContent(curNav);
+        }
       }
       // If bottom console is on controls tab, update it
       if (uiStore.getState().consoleTab === 'controls') {

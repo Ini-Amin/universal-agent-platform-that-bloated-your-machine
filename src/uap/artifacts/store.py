@@ -97,8 +97,12 @@ class ArtifactStore:
             raise TypeError("content must be str or bytes")
 
         rel = self._content_rel(artifact)
-        content_path = self.root / rel
-        content_path.parent.mkdir(parents=True, exist_ok=True)
+        # Same root-containment guard as get()/list()/delete_task(): a task
+        # directory that is a symlink out of the store must not be written
+        # through either (regression test in tests/test_store_containment.py).
+        directory = self._task_dir(artifact.task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        content_path = directory / rel.name
         self._write(content_path, payload)
 
         stored = artifact.model_copy(update={"uri": rel.as_posix()})

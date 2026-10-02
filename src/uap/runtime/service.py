@@ -500,12 +500,29 @@ class ExecutionService:
     # Read API (durable read model - a reconnecting UI resyncs from here)
     # ------------------------------------------------------------------ #
 
+    def _resolve_execution_id(self, session: Session, execution_id: str) -> uuid.UUID | None:
+        """Resolve a client-facing id to the durable execution row id.
+
+        The UI only ever knows the id it was handed by ``POST /tasks`` — which
+        the server stores as ``correlation_id``, NOT as the row's primary key.
+        Every read API must therefore accept either form. Without this, the WS
+        layer asked for events by correlation id, matched no rows, and fell back
+        to the in-memory sink — which holds only the 2 coarse lifecycle events,
+        so the Events panel showed 2 rows while PostgreSQL held 23.
+        """
+        eid = uuid.UUID(str(execution_id))
+        repo = ExecutionRepository(session)
+        row = repo.get(eid) or repo.get_by_correlation_id(eid)
+        return row.id if row is not None else None
+
     def status(self, execution_id: str) -> dict[str, Any]:
         """Return the durable status projection for ``execution_id``."""
 
         eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
-            row = ExecutionRepository(session).get(eid)
+            row = ExecutionRepository(session).get(eid) or (
+                ExecutionRepository(session).get_by_correlation_id(eid)
+            )
             if row is None:
                 raise LookupError(f"execution {execution_id} not found")
             return {
@@ -529,7 +546,10 @@ class ExecutionService:
 
         eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
-            rows = EventRepository(session).read_since(eid, int(after_seq))
+            resolved = self._resolve_execution_id(session, execution_id)
+            if resolved is None:
+                return []
+            rows = EventRepository(session).read_since(resolved, int(after_seq))
             return [
                 {
                     "seq": int(event.seq),
@@ -543,10 +563,17 @@ class ExecutionService:
             ]
 
     def checkpoints(self, execution_id: str) -> list[tuple[int, dict]]:
-        """Return ``(seq, state)`` checkpoints for an execution, ascending."""
+        """Return ``(seq, state)`` checkpoints for an execution, ascending.
+
+        Accepts either the row id or the client-facing correlation id, matching
+        :meth:`status` and :meth:`events_since`.
+        """
 
         with self._scope() as session:
-            return CheckpointStore(session).list_for_execution(str(execution_id))
+            resolved = self._resolve_execution_id(session, execution_id)
+            if resolved is None:
+                return []
+            return CheckpointStore(session).list_for_execution(str(resolved))
 
     # ------------------------------------------------------------------ #
     # Execution engine (called by the worker while it holds the lease)

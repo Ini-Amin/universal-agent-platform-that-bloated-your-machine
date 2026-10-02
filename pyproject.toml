@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "universal-agent-platform"
 version = "0.1.0"
 description = "Universal Agent Platform: modular, extensible, observable, resumable, domain-agnostic."
+license = "AGPL-3.0-or-later"
+authors = [{ name = "Aminabad Yunus" }]
 requires-python = ">=3.12"
 # Runtime dependencies — every top-level import in src/uap must be declared here.
 # (Challenger finding: the suite only passed locally because these were
