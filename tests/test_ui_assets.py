@@ -233,3 +233,26 @@ def test_chrome_controls_do_not_make_things_up(client: TestClient) -> None:
     assert "stage.showGuide()" in html
     assert "showGuide:" in client.get("/js/stage.js").text
 
+
+def test_task_header_wraps_instead_of_collapsing(client: TestClient) -> None:
+    css = client.get("/css/app.css").text
+    header = _css_rule(css, ".task-context-header")
+    # A fixed 92px single row crushed the task input to 10px once the output
+    # pane took 420px of a 1280px screen.
+    assert "flex-wrap: wrap;" in header
+    assert "max-height: 92px" not in header
+    assert "white-space: nowrap" in _css_rule(css, ".btn-add-surface")
+    # Top-right toasts sat on the layout / Add surface / Share controls.
+    assert "bottom: 24px" in _css_rule(css, ".toast-container")
+
+
+def test_keyboard_access_and_small_label_fixes(client: TestClient) -> None:
+    html = client.get("/").text
+    assert "key.toLowerCase() !== 'k'" in html  # Ctrl/Cmd+K, advertised by the placeholder
+    assert '[role="button"][tabindex="0"]' in html  # Enter/Space on role=button elements
+    # Preview used to relabel itself "Generate proposal" for good.
+    assert "btnProposal.textContent = proposalLabel;" in html
+    assert "btnProposal.textContent = 'Generate proposal';" not in html
+    assert "a.type !== name" in html  # artifact badge repeated the file name
+    assert 'class="modal-field-error"' in html  # empty workspace name had no message
+
