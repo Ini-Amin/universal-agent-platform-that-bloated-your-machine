@@ -51,6 +51,7 @@ from uap.workflows.research import ResearchWorkflow
 from uap.workflows.learning import WORKFLOW_NAME as LEARNING_WORKFLOW_NAME
 from uap.workflows.learning import LearningWorkflow
 from uap.workflows.scope import ScopeGate, ScopeRuleError
+from uap.sandbox import run_code_in_sandbox
 
 from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG, MCPServerConfig
 from uap.server.mcp_lifecycle import start_mcp_tools, stop_mcp_tools
@@ -59,7 +60,9 @@ from starlette.exceptions import WebSocketException
 from starlette.staticfiles import StaticFiles
 
 from uap.server.auth import (
+    auth_enabled,
     close_unauthorized_websocket,
+    get_current_identity,
     require_token,
     scrub_token_from_logs,
 )
@@ -118,6 +121,20 @@ class WorkspaceCreateRequest(BaseModel):
     name: str
     description: str | None = None
 
+class WorkspaceMemberAddRequest(BaseModel):
+    """Body of ``POST /api/workspaces/{id}/members``."""
+
+    user_id: str
+    role: str = "member"
+
+class UserCreateRequest(BaseModel):
+    """Body of ``POST /api/users``."""
+
+    name: str
+    email: str | None = None
+    role: str = "member"
+    id: str | None = None
+
 class WorkspaceFromTemplateRequest(BaseModel):
     """Body of ``POST /api/workspaces/from-template``.
 
@@ -152,6 +169,25 @@ class PruneRequest(BaseModel):
     older_than_days: int
     limit: int | None = None
 
+
+class SandboxRunRequest(BaseModel):
+    """Body of ``POST /api/sandbox/run``."""
+
+    language: str
+    code: str
+    timeout_s: float | None = None
+    max_memory_mb: int | None = None
+    max_output_bytes: int | None = None
+
+
+class SandboxRunResponse(BaseModel):
+    """Response of ``POST /api/sandbox/run``."""
+
+    stdout: str
+    stderr: str
+    exit_code: int
+    duration_ms: float
+    truncated: bool
 # --------------------------------------------------------------------------- #
 # Run bookkeeping
 # --------------------------------------------------------------------------- #
@@ -1205,9 +1241,21 @@ def create_app(
         }
 
     @app.post("/tasks")
-    async def create_task(body: TaskRequest) -> dict[str, Any]:
+    async def create_task(request: Request, body: TaskRequest) -> dict[str, Any]:
+        identity = get_current_identity(request)
+        if identity is not None:
+            if identity.role == "viewer":
+                raise HTTPException(
+                    status_code=403, detail="forbidden: viewers cannot create tasks"
+                )
+            effective_user_id = identity.user_id
+        else:
+            if auth_enabled():
+                raise HTTPException(status_code=401, detail="unauthorized")
+            effective_user_id = body.user_id
+
         return await _start_task(
-            body.input, user_id=body.user_id, workspace_id=body.workspace_id
+            body.input, user_id=effective_user_id, workspace_id=body.workspace_id
         )
 
     @app.get("/tasks")
@@ -1999,16 +2047,22 @@ def create_app(
             "status": str(ws.status),
             "created_at": ws.created_at.isoformat() if ws.created_at else None,
             "default_workflow_refs": ws.default_workflow_refs or [],
+            "owner_id": getattr(ws, "owner_id", None),
         }
 
     @app.get("/api/workspaces")
-    async def list_workspaces() -> list[dict[str, Any]]:
+    async def list_workspaces(request: Request) -> list[dict[str, Any]]:
         try:
-            from uap.workspace.store import WorkspaceStore
             from uap.db.engine import session_scope
+            from uap.db.repositories import WorkspaceRepository
+
+            identity = get_current_identity(request)
             with session_scope() as session:
-                store = WorkspaceStore(session=session)
-                items = store.list()
+                repo = WorkspaceRepository(session)
+                if identity is not None and identity.role != "admin":
+                    items = repo.list(user_id=identity.user_id, is_admin=False)
+                else:
+                    items = repo.list()
                 return [_workspace_json(ws) for ws in items]
         except Exception as exc:
             log_swallowed_exception(
@@ -2020,16 +2074,44 @@ def create_app(
             return []
 
     @app.post("/api/workspaces")
-    async def create_workspace(body: WorkspaceCreateRequest) -> dict[str, Any]:
+    async def create_workspace(
+        request: Request, body: WorkspaceCreateRequest
+    ) -> dict[str, Any]:
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403, detail="forbidden: viewers cannot create workspaces"
+            )
         try:
             from uap.workspace.store import WorkspaceStore
             from uap.workspace.model import Workspace
             from uap.db.engine import session_scope
+            from uap.db.repositories import WorkspaceMemberRepository
+            from uap.db.models.workspace import WorkspaceRow
+
+            owner = identity.user_id if identity and identity.user_id != "operator" else None
             with session_scope() as session:
                 store = WorkspaceStore(session=session)
-                ws = store.create(Workspace(id=str(uuid.uuid4()), name=body.name, description=body.description or ""))
+                ws = store.create(
+                    Workspace(
+                        id=str(uuid.uuid4()),
+                        name=body.name,
+                        description=body.description or "",
+                    )
+                )
+                if owner:
+                    row = session.get(WorkspaceRow, ws.id)
+                    if row is not None:
+                        row.owner_id = owner
+                    mem_repo = WorkspaceMemberRepository(session)
+                    mem_repo.add_member(ws.id, owner, role="owner")
                 session.commit()
-                return _workspace_json(ws)
+                res = _workspace_json(ws)
+                if owner:
+                    res["owner_id"] = owner
+                return res
+        except HTTPException:
+            raise
         except Exception as exc:
             log_swallowed_exception(
                 logger,
@@ -2038,7 +2120,76 @@ def create_app(
                 level=logging.ERROR,
                 name=body.name,
             )
-            raise HTTPException(status_code=503, detail=f"workspace creation failed: {redact_text(str(exc))}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"workspace creation failed: {redact_text(str(exc))}",
+            )
+
+    @app.post("/api/workspaces/{workspace_id}/members")
+    async def add_workspace_member_route(
+        request: Request,
+        workspace_id: str,
+        body: WorkspaceMemberAddRequest,
+    ) -> dict[str, Any]:
+        """Add a member to a workspace."""
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403, detail="forbidden: viewers cannot manage members"
+            )
+
+        from uap.db.engine import session_scope
+        from uap.db.repositories import (
+            UserRepository,
+            WorkspaceMemberRepository,
+            WorkspaceRepository,
+        )
+
+        with session_scope() as session:
+            ws_repo = WorkspaceRepository(session)
+            ws = ws_repo.get(workspace_id)
+            if ws is None:
+                raise HTTPException(
+                    status_code=404, detail=f"workspace {workspace_id!r} not found"
+                )
+
+            # Check permissions: admin or workspace owner / admin member
+            if identity is not None and identity.role != "admin":
+                is_owner = ws.owner_id == identity.user_id
+                mem_repo = WorkspaceMemberRepository(session)
+                membership = (
+                    mem_repo.get_member(workspace_id, identity.user_id)
+                    if identity.user_id
+                    else None
+                )
+                is_ws_admin = membership is not None and membership.role in (
+                    "owner",
+                    "admin",
+                )
+                if not (is_owner or is_ws_admin):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="forbidden: workspace admin or owner required",
+                    )
+
+            user_repo = UserRepository(session)
+            target_user = user_repo.get(body.user_id)
+            if target_user is None:
+                raise HTTPException(
+                    status_code=404, detail=f"user {body.user_id!r} not found"
+                )
+
+            mem_repo = WorkspaceMemberRepository(session)
+            member = mem_repo.add_member(workspace_id, body.user_id, role=body.role)
+            session.commit()
+            return {
+                "workspace_id": member.workspace_id,
+                "user_id": member.user_id,
+                "role": member.role,
+                "created_at": member.created_at.isoformat()
+                if member.created_at
+                else None,
+            }
 
     # -- /api/templates -------------------------------------------------- #
 
@@ -2065,6 +2216,7 @@ def create_app(
 
     @app.post("/api/workspaces/from-template")
     async def create_workspace_from_template(
+        request: Request,
         body: WorkspaceFromTemplateRequest,
     ) -> dict[str, Any]:
         """Create a workspace from a template AND start its task.
@@ -2074,6 +2226,12 @@ def create_app(
         to the canvas. The task runs through exactly the same gate as
         ``POST /tasks`` -- this endpoint does not add a second execution path.
         """
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403, detail="forbidden: viewers cannot create workspaces"
+            )
+
         from uap.templates import template_detail
 
         detail = template_detail(body.template)
@@ -2090,27 +2248,43 @@ def create_app(
             )
 
         workflow_ref = detail["workflow"]["workflow_ref"]
+        effective_user = (
+            identity.user_id
+            if identity and identity.user_id != "operator"
+            else body.user_id
+        )
 
         # 1. Create the workspace, pinned to the template's workflow ref.
         try:
-            from uap.workspace.store import WorkspaceStore
-            from uap.workspace.model import Workspace
             from uap.db.engine import session_scope
+            from uap.db.repositories import WorkspaceMemberRepository, WorkspaceRepository
 
+            ws_id = str(uuid.uuid4())
             with session_scope() as session:
-                store = WorkspaceStore(session=session)
-                ws = store.create(
-                    Workspace(
-                        id=str(uuid.uuid4()),
-                        name=detail["title"],
-                        description=detail["description"],
-                        settings={
-                            "template": body.template,
-                            "tags": list(detail["tags"]),
+                ws_repo = WorkspaceRepository(session)
+                ws = ws_repo.create(
+                    type(
+                        "WS",
+                        (),
+                        {
+                            "id": ws_id,
+                            "name": detail["title"],
+                            "description": detail["description"],
+                            "root_path": "",
+                            "status": "active",
+                            "settings": {
+                                "template": body.template,
+                                "tags": list(detail["tags"]),
+                            },
+                            "default_workflow_refs": [workflow_ref],
+                            "owner_id": effective_user,
                         },
-                        default_workflow_refs=[workflow_ref],
-                    )
+                    )()
                 )
+                if effective_user:
+                    mem_repo = WorkspaceMemberRepository(session)
+                    mem_repo.add_member(ws_id, effective_user, role="owner")
+                session.commit()
                 workspace_json = _workspace_json(ws)
         except Exception as exc:
             log_swallowed_exception(
@@ -2127,7 +2301,7 @@ def create_app(
 
         # 2. Start the task, bound to the new workspace.
         task = await _start_task(
-            body.input, user_id=body.user_id, workspace_id=workspace_json["id"]
+            body.input, user_id=effective_user, workspace_id=workspace_json["id"]
         )
         if task.get("status") == "clarification":
             return {
@@ -2144,6 +2318,118 @@ def create_app(
             "status": task.get("status", "accepted"),
         }
 
+
+    # -- /api/users ------------------------------------------------------ #
+
+    def _user_json(user: Any, api_key: str | None = None) -> dict[str, Any]:
+        data = {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "is_active": user.is_active,
+            "created_at": user.created_at.isoformat()
+            if getattr(user, "created_at", None)
+            else None,
+            "last_seen_at": user.last_seen_at.isoformat()
+            if getattr(user, "last_seen_at", None)
+            else None,
+        }
+        if api_key is not None:
+            data["api_key"] = api_key
+        return data
+
+    def _check_admin(request: Request) -> None:
+        identity = get_current_identity(request)
+        if identity is None:
+            if auth_enabled():
+                raise HTTPException(status_code=401, detail="unauthorized")
+            return
+        if identity.role != "admin":
+            raise HTTPException(status_code=403, detail="forbidden: admin required")
+
+    @app.post("/api/users")
+    async def create_user_route(
+        request: Request, body: UserCreateRequest
+    ) -> dict[str, Any]:
+        """Create a user and return their raw API key (shown ONCE). Requires admin."""
+        _check_admin(request)
+        if body.role not in ("admin", "member", "viewer"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid role {body.role!r}; must be one of admin, member, viewer",
+            )
+
+        from uap.users import generate_api_key, hash_api_key
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
+
+        raw_key = generate_api_key()
+        key_hash = hash_api_key(raw_key)
+
+        with session_scope() as session:
+            repo = UserRepository(session)
+            user = repo.create(
+                name=body.name,
+                role=body.role,
+                email=body.email,
+                api_key_hash=key_hash,
+                user_id=body.id,
+            )
+            session.commit()
+            return _user_json(user, api_key=raw_key)
+
+    @app.get("/api/users")
+    async def list_users_route(request: Request) -> list[dict[str, Any]]:
+        """List users without sensitive keys. Requires admin."""
+        _check_admin(request)
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
+
+        with session_scope() as session:
+            repo = UserRepository(session)
+            users = repo.list()
+            return [_user_json(u) for u in users]
+
+    @app.post("/api/users/{user_id}/rotate")
+    async def rotate_user_key_route(request: Request, user_id: str) -> dict[str, Any]:
+        """Rotate an API key. Old key stops working immediately. Requires admin."""
+        _check_admin(request)
+        from uap.users import generate_api_key, hash_api_key
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
+
+        raw_key = generate_api_key()
+        key_hash = hash_api_key(raw_key)
+
+        with session_scope() as session:
+            repo = UserRepository(session)
+            user = repo.get(user_id)
+            if user is None:
+                raise HTTPException(
+                    status_code=404, detail=f"user {user_id!r} not found"
+                )
+            user = repo.rotate_key(user_id, key_hash)
+            session.commit()
+            return _user_json(user, api_key=raw_key)
+
+    @app.post("/api/users/{user_id}/deactivate")
+    async def deactivate_user_route(request: Request, user_id: str) -> dict[str, Any]:
+        """Deactivate a user. Key stops working immediately. Requires admin."""
+        _check_admin(request)
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
+
+        with session_scope() as session:
+            repo = UserRepository(session)
+            user = repo.get(user_id)
+            if user is None:
+                raise HTTPException(
+                    status_code=404, detail=f"user {user_id!r} not found"
+                )
+            user = repo.deactivate(user_id)
+            session.commit()
+            return _user_json(user)
     # -- /api/tasks/{task_id}/artifacts ---------------------------------- #
 
     @app.get("/api/tasks/{task_id}/artifacts")
@@ -2345,6 +2631,56 @@ def create_app(
 
         task_input = f"bug bounty on {scope}"
         return await _start_task(task_input, user_id=user_id, workspace_id=workspace_id)
+
+    # -- /api/sandbox/run ------------------------------------------------ #
+
+    @app.post("/api/sandbox/run", response_model=SandboxRunResponse)
+    async def run_sandbox_code(
+        request: Request, body: SandboxRunRequest
+    ) -> dict[str, Any]:
+        """Execute arbitrary user code safely inside the isolated process sandbox.
+
+        Why auth matters more here than elsewhere:
+        This endpoint executes arbitrary user-supplied code via the sandbox. Unlike
+        read-only or constrained workflow endpoints, code execution has direct access
+        to CPU, memory, and system calls within the child process boundary. Even with
+        OS-level resource limits (RLIMIT_AS, RLIMIT_CPU, wall-clock timeout, output
+        caps), unauthenticated access would expose the host to denial-of-service,
+        resource exhaustion, or potential sandbox escape exploits. Therefore, strict
+        authentication is mandatory before any execution request reaches the sandbox.
+        """
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403, detail="forbidden: viewers cannot execute code"
+            )
+
+        lang = body.language.strip().lower()
+        if lang != "python":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported language '{body.language}'. Supported languages: python",
+            )
+
+        timeout_s = body.timeout_s if body.timeout_s is not None else 5.0
+        if timeout_s <= 0 or timeout_s > 300.0:
+            raise HTTPException(
+                status_code=400,
+                detail="timeout_s must be between 0.05 and 300.0 seconds",
+            )
+
+        max_memory_mb = body.max_memory_mb if body.max_memory_mb is not None else 512
+        max_output_bytes = (
+            body.max_output_bytes if body.max_output_bytes is not None else 65536
+        )
+
+        return await run_code_in_sandbox(
+            code=body.code,
+            language=lang,
+            timeout_s=timeout_s,
+            max_memory_mb=max_memory_mb,
+            max_output_bytes=max_output_bytes,
+        )
 
     # Canvas IDE is the primary UI at the root: mounted LAST so every API route
     # above wins; only unmatched paths (/, /js/*, /css/*) fall through to it.

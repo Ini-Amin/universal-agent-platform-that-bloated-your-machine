@@ -92,6 +92,8 @@ EXPECTED_TABLES = {
     "knowledge_events",
     "node_views",
     "workspaces",
+    "users",
+    "workspace_members",
 }
 
 

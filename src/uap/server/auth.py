@@ -21,6 +21,9 @@ nor echoed into a response body.
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
+
 import logging
 import os
 import re
@@ -34,15 +37,31 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 __all__ = [
+    "EXEMPT_PREFIXES",
+    "Identity",
     "api_token",
     "auth_enabled",
-    "require_token",
-    "is_exempt",
-    "guard_fastapi_builtin_routes",
     "close_unauthorized_websocket",
+    "get_current_identity",
+    "guard_fastapi_builtin_routes",
+    "is_exempt",
+    "require_admin",
+    "require_role",
+    "require_token",
+    "require_writer",
+    "resolve_identity",
     "scrub_token_from_logs",
-    "EXEMPT_PREFIXES",
 ]
+
+
+@dataclass(frozen=True)
+class Identity:
+    """The authenticated security principal for a request."""
+
+    user_id: str | None
+    name: str
+    role: str  # "admin" | "member" | "viewer"
+    is_bootstrap: bool = False
 
 #: UI-shell paths reachable without a token. Prefix match on the request path.
 #: The static mounts (``/``, ``/ui``, ``/legacy``) bypass route dependencies
@@ -73,9 +92,57 @@ def api_token() -> str | None:
 
 
 def auth_enabled() -> bool:
-    """``True`` when ``UAP_API_TOKEN`` is set to a non-empty value."""
-    return api_token() is not None
+    """``True`` when ``UAP_API_TOKEN`` is set or registered users exist."""
+    if api_token() is not None:
+        return True
+    try:
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
 
+        with session_scope() as session:
+            return UserRepository(session).has_users()
+    except Exception:
+        return False
+
+
+def resolve_identity(conn: HTTPConnection) -> Identity | None:
+    """Resolve the authenticated Identity from the connection, or ``None``."""
+    presented = _presented(conn)
+    if presented is None:
+        return None
+
+    # 1. Bootstrap operator token (UAP_API_TOKEN acts as admin credential)
+    expected = api_token()
+    if expected is not None and _matches(expected, presented):
+        return Identity(
+            user_id="operator",
+            name="Operator Admin",
+            role="admin",
+            is_bootstrap=True,
+        )
+
+    # 2. Hashed user API key lookup
+    key_hash = hashlib.sha256(presented.encode("utf-8")).hexdigest()
+    try:
+        from uap.db.engine import session_scope
+        from uap.db.repositories import UserRepository
+
+        with session_scope() as session:
+            repo = UserRepository(session)
+            user = repo.get_by_api_key_hash(key_hash)
+            if user is not None and user.is_active:
+                repo.touch_last_seen(user.id)
+                session.commit()
+                return Identity(
+                    user_id=user.id,
+                    name=user.name,
+                    role=user.role,
+                    is_bootstrap=False,
+                )
+    except Exception:
+        pass
+
+    return None
 
 def is_exempt(path: str) -> bool:
     """``True`` for UI-shell paths that stay reachable without a token."""
@@ -103,24 +170,50 @@ def _matches(expected: str, presented: str | None) -> bool:
 
 
 async def require_token(conn: HTTPConnection) -> None:
-    """App-level dependency: fail closed unless the request carries the token.
-
-    Declared with :class:`~starlette.requests.HTTPConnection` (not ``Request``)
-    so FastAPI can resolve it for websocket routes too.
-
-    Raises:
-        HTTPException: 401 ``{"detail": "unauthorized"}`` for HTTP requests.
-        WebSocketException: close code 1008 (policy violation) for handshakes.
-    """
-    expected = api_token()
-    if expected is None or is_exempt(conn.url.path):
+    """App-level dependency: fail closed unless the request carries a valid credential."""
+    identity = resolve_identity(conn)
+    if identity is not None:
+        conn.state.identity = identity
+        conn.state.user_id = identity.user_id
+        conn.state.user_role = identity.role
         return
-    if _matches(expected, _presented(conn)):
+
+    if is_exempt(conn.url.path):
         return
+
+    if not auth_enabled():
+        return
+
     if conn.scope.get("type") == "websocket":
         raise WebSocketException(code=1008, reason="unauthorized")
     raise HTTPException(status_code=401, detail="unauthorized")
 
+
+def get_current_identity(conn: HTTPConnection) -> Identity | None:
+    """Retrieve the resolved identity from connection state, or None."""
+    return getattr(conn.state, "identity", None)
+
+
+def require_role(*allowed_roles: str):
+    """Dependency enforcing that the caller has one of the specified roles."""
+
+    async def dependency(conn: HTTPConnection) -> Identity | None:
+        identity = get_current_identity(conn)
+        if identity is None:
+            if not auth_enabled():
+                return None
+            raise HTTPException(status_code=401, detail="unauthorized")
+        if identity.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403, detail="forbidden: insufficient permissions"
+            )
+        return identity
+
+    return dependency
+
+
+require_admin = require_role("admin")
+require_writer = require_role("admin", "member")
 
 def _token_gated(app: ASGIApp) -> ASGIApp:
     """Wrap an ASGI app with the very check :func:`require_token` runs.
@@ -131,16 +224,19 @@ def _token_gated(app: ASGIApp) -> ASGIApp:
     """
 
     async def gated(scope: Scope, receive: Receive, send: Send) -> None:
-        expected = api_token()
-        if expected is None or scope["type"] != "http" or is_exempt(scope["path"]):
+        if not auth_enabled() or scope["type"] != "http" or is_exempt(scope["path"]):
             await app(scope, receive, send)
             return
-        if _matches(expected, _presented(Request(scope, receive))):
+        req = Request(scope, receive)
+        identity = resolve_identity(req)
+        if identity is not None:
+            if "state" not in scope:
+                scope["state"] = {}
+            scope["state"]["identity"] = identity
             await app(scope, receive, send)
             return
         denial = JSONResponse({"detail": "unauthorized"}, status_code=401)
         await denial(scope, receive, send)
-
     return gated
 
 

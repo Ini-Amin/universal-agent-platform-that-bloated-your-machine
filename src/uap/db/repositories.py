@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from uap.db.models.definitions import (
@@ -44,12 +44,15 @@ from uap.db.models.definitions import (
 )
 from uap.db.models.execution import Execution, ExecutionEvent, ExecutionStatus
 from uap.db.models.workspace import WorkspaceRow
+from uap.db.models.user import UserRow, WorkspaceMemberRow
 
 __all__ = [
     "DefinitionRepository",
     "EventRepository",
     "ExecutionRepository",
     "WorkspaceRepository",
+    "UserRepository",
+    "WorkspaceMemberRepository",
     "canonical_json",
     "compute_content_hash",
 ]
@@ -558,6 +561,7 @@ class WorkspaceRepository:
             default_workflow_refs=list(
                 getattr(workspace, "default_workflow_refs", None) or []
             ),
+            owner_id=getattr(workspace, "owner_id", None),
         )
         self._session.add(row)
         self._session.flush()
@@ -566,8 +570,27 @@ class WorkspaceRepository:
     def get(self, workspace_id: str) -> WorkspaceRow | None:
         return self._session.get(WorkspaceRow, str(workspace_id))
 
-    def list(self) -> Sequence[WorkspaceRow]:
-        stmt = select(WorkspaceRow).order_by(WorkspaceRow.created_at.desc())
+    def list(
+        self,
+        user_id: str | None = None,
+        is_admin: bool = False,
+    ) -> Sequence[WorkspaceRow]:
+        if not is_admin and user_id is not None:
+            member_subq = select(WorkspaceMemberRow.workspace_id).where(
+                WorkspaceMemberRow.user_id == str(user_id)
+            )
+            stmt = (
+                select(WorkspaceRow)
+                .where(
+                    or_(
+                        WorkspaceRow.owner_id == str(user_id),
+                        WorkspaceRow.id.in_(member_subq),
+                    )
+                )
+                .order_by(WorkspaceRow.created_at.desc())
+            )
+        else:
+            stmt = select(WorkspaceRow).order_by(WorkspaceRow.created_at.desc())
         return list(self._session.execute(stmt).scalars().all())
 
     def update(self, workspace: Any) -> WorkspaceRow:
@@ -599,3 +622,111 @@ class WorkspaceRepository:
 def _status_text(value: Any) -> str:
     """Render a ``StrEnum``/string status as its plain string value."""
     return str(getattr(value, "value", value))
+
+
+class UserRepository:
+    """CRUD for ``users`` rows."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        name: str,
+        role: str = "member",
+        email: str | None = None,
+        api_key_hash: str = "",
+        user_id: str | None = None,
+    ) -> UserRow:
+        uid = str(user_id) if user_id is not None else f"u-{uuid.uuid4().hex[:12]}"
+        row = UserRow(
+            id=uid,
+            name=str(name),
+            email=str(email) if email is not None else None,
+            role=str(role),
+            api_key_hash=str(api_key_hash),
+            is_active=True,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def get(self, user_id: str) -> UserRow | None:
+        return self._session.get(UserRow, str(user_id))
+
+    def get_by_api_key_hash(self, api_key_hash: str) -> UserRow | None:
+        stmt = select(UserRow).where(UserRow.api_key_hash == str(api_key_hash))
+        return self._session.execute(stmt).scalars().first()
+
+    def list(self) -> Sequence[UserRow]:
+        stmt = select(UserRow).order_by(UserRow.created_at.asc())
+        return list(self._session.execute(stmt).scalars().all())
+
+    def rotate_key(self, user_id: str, new_api_key_hash: str) -> UserRow:
+        row = self.get(user_id)
+        if row is None:
+            raise KeyError(f"no user with id {user_id!r}")
+        row.api_key_hash = str(new_api_key_hash)
+        self._session.flush()
+        return row
+
+    def deactivate(self, user_id: str) -> UserRow:
+        row = self.get(user_id)
+        if row is None:
+            raise KeyError(f"no user with id {user_id!r}")
+        row.is_active = False
+        self._session.flush()
+        return row
+
+    def touch_last_seen(self, user_id: str) -> None:
+        row = self.get(user_id)
+        if row is not None:
+            row.last_seen_at = datetime.now(timezone.utc)
+            self._session.flush()
+
+    def has_users(self) -> bool:
+        stmt = select(func.count(UserRow.id)).limit(1)
+        count = self._session.execute(stmt).scalar() or 0
+        return count > 0
+
+
+class WorkspaceMemberRepository:
+    """CRUD for ``workspace_members`` rows."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add_member(
+        self, workspace_id: str, user_id: str, role: str = "member"
+    ) -> WorkspaceMemberRow:
+        row = self.get_member(workspace_id, user_id)
+        if row is not None:
+            row.role = str(role)
+        else:
+            row = WorkspaceMemberRow(
+                workspace_id=str(workspace_id),
+                user_id=str(user_id),
+                role=str(role),
+            )
+            self._session.add(row)
+        self._session.flush()
+        return row
+
+    def get_member(
+        self, workspace_id: str, user_id: str
+    ) -> WorkspaceMemberRow | None:
+        return self._session.get(WorkspaceMemberRow, (str(workspace_id), str(user_id)))
+
+    def list_members(self, workspace_id: str) -> Sequence[WorkspaceMemberRow]:
+        stmt = (
+            select(WorkspaceMemberRow)
+            .where(WorkspaceMemberRow.workspace_id == str(workspace_id))
+            .order_by(WorkspaceMemberRow.created_at.asc())
+        )
+        return list(self._session.execute(stmt).scalars().all())
+
+    def list_user_workspaces(self, user_id: str) -> Sequence[str]:
+        stmt = select(WorkspaceMemberRow.workspace_id).where(
+            WorkspaceMemberRow.user_id == str(user_id)
+        )
+        return list(self._session.execute(stmt).scalars().all())

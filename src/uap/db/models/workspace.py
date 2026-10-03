@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,6 +42,10 @@ class WorkspaceRow(Base):
     #: active / archived / deleted (soft-delete marker written by the store).
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", index=True)
 
+    #: The user id of the workspace owner (nullable for legacy/unowned workspaces).
+    owner_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

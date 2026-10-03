@@ -1,6 +1,10 @@
-"""WebSocket execution transport protocol (§44).
+"""WebSocket transport protocols (§44, §53).
 
-Protocol:
+Routes:
+  /ws/executions/{execution_id} - Execution event stream and control (pause/resume/fork).
+  /ws/terminal                  - Interactive shell for the workspace directory.
+
+Protocol (/ws/executions):
   Client -> Server:
     {"type": "resync", "after_seq": N}
     {"type": "pause"}
@@ -15,12 +19,38 @@ Protocol:
     {"type": "error", "message": ...}
     {"type": "forked", "execution_id": ...}
 
-On connect:
-  Sends current status + all events since 0 (or since client's after_seq on resync) - reconnect-safe (§44).
+Protocol (/ws/terminal):
+  Client -> Server:
+    {"type": "stdin", "data": "command\\n"}
+    {"type": "ping"}
 
-Live updates:
-  Polls service.events_since(execution_id, last_seq) every 0.5s and pushes new events.
-  (Simple and deterministic for this server; a production worker deployment would push via pub/sub).
+  Server -> Client:
+    {"type": "stdout", "data": "..."}
+    {"type": "error", "message": "...", "data": "..."}
+    {"type": "pong"}
+
+SECURITY & RESIDUAL RISK (/ws/terminal):
+  The /ws/terminal route provides a remote interactive shell in the UAP workspace
+  directory for whoever holds a valid authentication credential (or anonymous callers
+  when auth is disabled).
+  The session is bounded by:
+  - Authentication: Handshake closed with code 1008 unless authorized when UAP_API_TOKEN is set.
+    Unauthenticated handshakes are rejected uniformly, preventing route-existence leakage.
+  - Concurrency limit: Maximum 5 concurrent sessions (MAX_CONCURRENT_TERMINAL_SESSIONS)
+    to prevent denial of service and process table exhaustion.
+  - Working directory scoping: Working directory is strictly scoped to the workspace root;
+    directory escapes via 'cd /' or 'cd ../..' are refused.
+  - Sandbox isolation: Commands are executed in forked child processes enforcing RLIMIT_AS
+    (512MB RAM) and RLIMIT_CPU resource limits via SandboxPolicy.
+  - Execution bounds: 10.0s command timeout (DEFAULT_TERMINAL_TIMEOUT) and 64KB output cap
+    (DEFAULT_MAX_OUTPUT_BYTES = 65536). Timeouts are honestly announced in the output stream.
+  - No server-side shell injection: Input is parsed with shlex and executed directly via
+    subprocess.run with shell=False.
+  RESIDUAL RISK:
+  By design, this route allows arbitrary command execution with the privileges of the
+  server process inside the workspace directory. Any bearer of a valid API token can
+  execute commands, read/write workspace files, and consume allotted CPU/memory.
+  This is the intended functionality of the remote terminal client, not an accidental exposure.
 """
 
 from __future__ import annotations
@@ -29,17 +59,253 @@ import asyncio
 import contextlib
 import inspect
 import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
 from typing import Any, Callable
 
 from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from uap.sandbox.executor import Sandbox, SandboxPolicy, SandboxViolation
+
 __all__ = [
+    "DEFAULT_MAX_OUTPUT_BYTES",
+    "DEFAULT_TERMINAL_TIMEOUT",
+    "MAX_CONCURRENT_TERMINAL_SESSIONS",
     "ConnectionManager",
+    "TerminalSessionTracker",
     "build_ws_router",
     "router",
     "ws_execution",
+    "ws_terminal",
 ]
+
+DEFAULT_TERMINAL_TIMEOUT: float = 10.0
+DEFAULT_MAX_OUTPUT_BYTES: int = 65536
+MAX_CONCURRENT_TERMINAL_SESSIONS: int = 5
+
+
+class TerminalSessionTracker:
+    """Tracks active terminal WebSocket sessions with a concurrency cap."""
+
+    def __init__(self, max_sessions: int = MAX_CONCURRENT_TERMINAL_SESSIONS) -> None:
+        self.max_sessions = max_sessions
+        self._active: set[Any] = set()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, websocket: Any) -> bool:
+        async with self._lock:
+            current_max = globals().get("MAX_CONCURRENT_TERMINAL_SESSIONS", self.max_sessions)
+            if len(self._active) >= current_max:
+                return False
+            self._active.add(websocket)
+            return True
+
+    async def release(self, websocket: Any) -> None:
+        async with self._lock:
+            self._active.discard(websocket)
+
+    def count(self) -> int:
+        return len(self._active)
+
+
+_default_terminal_tracker = TerminalSessionTracker()
+
+
+def _exec_child_command(argv: list[str], cwd: str, timeout: float) -> str:
+    """Run program invocation inside sandboxed child process (shell=False)."""
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+         )
+        return proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        raise SandboxViolation(f"execution exceeded {timeout:.1f}s timeout") from exc
+    except FileNotFoundError:
+        return f"{argv[0]}: command not found\n"
+    except PermissionError:
+        return f"{argv[0]}: permission denied\n"
+    except Exception as exc:
+        return f"error: {exc}\n"
+
+
+async def ws_terminal(
+    websocket: WebSocket,
+    workspace_dir: Path | str | None = None,
+    session_tracker: TerminalSessionTracker | None = None,
+) -> None:
+    """Interactive WebSocket terminal session handler in workspace directory."""
+    tracker = session_tracker or _default_terminal_tracker
+    acquired = await tracker.acquire(websocket)
+    if not acquired:
+        if hasattr(websocket, "accept"):
+            await websocket.accept()
+        if hasattr(websocket, "send_json"):
+            await websocket.send_json({
+                "type": "error",
+                "message": "too many concurrent terminal sessions\n",
+                "data": "too many concurrent terminal sessions\n",
+            })
+        if hasattr(websocket, "close"):
+            await websocket.close(code=1008, reason="too many concurrent terminal sessions")
+        return
+
+    if hasattr(websocket, "accept"):
+        try:
+            await websocket.accept()
+        except Exception:
+            pass
+
+    ws_state = getattr(getattr(websocket, "app", None), "state", None)
+    app_ws_root = getattr(ws_state, "workspace_dir", None)
+    if workspace_dir is not None:
+        workspace_root = Path(workspace_dir).resolve()
+    elif app_ws_root is not None:
+        workspace_root = Path(app_ws_root).resolve()
+    elif "UAP_WORKSPACE_DIR" in os.environ:
+        workspace_root = Path(os.environ["UAP_WORKSPACE_DIR"]).resolve()
+    else:
+        workspace_root = Path.cwd().resolve()
+
+    current_cwd = workspace_root
+
+    try:
+        while True:
+            try:
+                raw_text = await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+
+            try:
+                payload = json.loads(raw_text)
+            except Exception:
+                payload = {"data": raw_text}
+
+            if isinstance(payload, dict):
+                msg_type = payload.get("type")
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+                cmd_line = payload.get("data") or payload.get("command") or ""
+            elif isinstance(payload, str):
+                cmd_line = payload
+            else:
+                cmd_line = ""
+
+            if not isinstance(cmd_line, str):
+                cmd_line = str(cmd_line)
+
+            cmd_line = cmd_line.strip()
+            if not cmd_line:
+                await websocket.send_json({"type": "stdout", "data": ""})
+                continue
+
+            try:
+                argv = shlex.split(cmd_line)
+            except ValueError as err:
+                err_msg = f"syntax error: {err}\n"
+                await websocket.send_json({
+                    "type": "error",
+                    "message": err_msg,
+                    "data": err_msg,
+                })
+                continue
+
+            if not argv:
+                await websocket.send_json({"type": "stdout", "data": ""})
+                continue
+
+            prog = argv[0]
+
+            if prog == "cd":
+                if len(argv) == 1 or argv[1] in ("~", ""):
+                    target_path = workspace_root
+                else:
+                    target_path = (current_cwd / argv[1]).resolve()
+
+                if target_path == workspace_root or workspace_root in target_path.parents:
+                    if target_path.is_dir():
+                        current_cwd = target_path
+                        await websocket.send_json({"type": "stdout", "data": ""})
+                    else:
+                        msg = f"cd: no such file or directory: {argv[1]}\n"
+                        await websocket.send_json({"type": "error", "message": msg, "data": msg})
+                else:
+                    msg = f"cd: restricted to workspace: {argv[1]}\n"
+                    await websocket.send_json({"type": "error", "message": msg, "data": msg})
+                continue
+
+            if prog == "pwd":
+                await websocket.send_json({"type": "stdout", "data": f"{current_cwd}\n"})
+                continue
+
+            if prog in ("exit", "quit"):
+                await websocket.send_json({"type": "stdout", "data": "exit\n"})
+                if hasattr(websocket, "close"):
+                    await websocket.close(code=1000, reason="session ended")
+                break
+
+            if prog == "clear":
+                await websocket.send_json({"type": "stdout", "data": "\x1b[2J\x1b[H"})
+                continue
+
+            timeout = float(globals().get("DEFAULT_TERMINAL_TIMEOUT", DEFAULT_TERMINAL_TIMEOUT))
+            max_bytes = int(globals().get("DEFAULT_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES))
+
+            policy = SandboxPolicy(
+                max_cpu_seconds=timeout,
+                max_memory_mb=512,
+                max_output_bytes=max_bytes,
+                allow_subprocess=True,
+                allow_fs_read_paths=(str(workspace_root),),
+                allow_fs_write_paths=(str(workspace_root),),
+            )
+            sandbox = Sandbox(policy)
+
+            try:
+                output = await sandbox.run_guarded(
+                    _exec_child_command,
+                    argv,
+                    str(current_cwd),
+                    timeout,
+                )
+                if not isinstance(output, str):
+                    output = (
+                        output.decode("utf-8", errors="replace")
+                        if isinstance(output, (bytes, bytearray))
+                        else str(output)
+                    )
+
+                if len(output.encode("utf-8")) >= max_bytes:
+                    output += "\n[output truncated: exceeded byte cap]\n"
+
+                await websocket.send_json({"type": "stdout", "data": output})
+
+            except SandboxViolation as exc:
+                err_msg = f"\n[error] {exc}\n"
+                await websocket.send_json({
+                    "type": "error",
+                    "message": err_msg,
+                    "data": err_msg,
+                })
+            except Exception as exc:
+                err_msg = f"\n[error] execution failure: {exc}\n"
+                await websocket.send_json({
+                    "type": "error",
+                    "message": err_msg,
+                    "data": err_msg,
+                })
+    finally:
+        await tracker.release(websocket)
 
 
 class ConnectionManager:
@@ -263,14 +529,26 @@ async def ws_execution(
 def build_ws_router(
     service_factory: Callable[[], Any] | Any = None,
     manager: ConnectionManager | None = None,
+    terminal_tracker: TerminalSessionTracker | None = None,
+    workspace_dir: Path | str | None = None,
 ) -> APIRouter:
     ws_router = APIRouter()
     mgr = manager or _default_manager
+    t_tracker = terminal_tracker or _default_terminal_tracker
+
+    @ws_router.websocket("/ws/terminal")
+    async def terminal_endpoint(websocket: WebSocket) -> None:
+        await ws_terminal(websocket, workspace_dir=workspace_dir, session_tracker=t_tracker)
 
     @ws_router.websocket("/ws/executions/{execution_id}")
     async def ws_endpoint(websocket: WebSocket, execution_id: str) -> None:
         svc = service_factory() if callable(service_factory) else service_factory
         await ws_execution(websocket, execution_id, svc, manager=mgr)
+
+    @ws_router.websocket("/ws/{path:path}")
+    async def ws_fallback(websocket: WebSocket, path: str) -> None:
+        await websocket.accept()
+        await websocket.close(code=1000, reason="route not found")
 
     return ws_router
 
