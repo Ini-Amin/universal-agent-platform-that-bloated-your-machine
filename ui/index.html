@@ -195,7 +195,7 @@
             </svg>
             <span>History</span>
           </button>
-          <button id="btn-run-again" class="btn btn-run-again" title="Run again">
+          <button id="btn-run-again" class="btn btn-run-again" title="Run a task first" disabled>
             <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
               <path d="M3 2L12 7L3 12V2Z" fill="#FFFFFF"/>
             </svg>
@@ -2350,10 +2350,37 @@
     });
 
     // Update Header Status Badge from executionStore
+    // What the header says about the selected run. The task box is cleared on
+    // submit and the label was a UUID fragment, so after a run nothing on screen
+    // said which task was showing, and "Ready to run" never changed.
+    const RUN_STATUS_VERB = { connecting: 'Loading', running: 'Running', completed: 'Completed', failed: 'Failed', paused: 'Paused' };
+    function renderRunContext(state) {
+      const taskText = (state.task && state.task.input ? String(state.task.input) : '').trim();
+      const meta = document.getElementById('task-context-meta');
+      if (meta) {
+        if (!state.executionId) {
+          meta.textContent = 'Ready to run';
+          meta.removeAttribute('title');
+        } else {
+          const verb = RUN_STATUS_VERB[state.status] || state.status;
+          meta.textContent = taskText ? `${verb}: ${taskText}` : `${verb}…`;
+          meta.title = taskText;
+        }
+      }
+      const label = document.getElementById('active-task-label');
+      if (label && state.executionId) label.title = `${taskText || 'Task'}\n${state.executionId}`;
+      const again = document.getElementById('btn-run-again');
+      if (again) {
+        again.disabled = !taskText;
+        again.title = taskText ? `Run again: ${taskText}` : 'Run a task first';
+      }
+    }
+
     let _lastTerminalRefresh = null;
     // Run started from this page: its finish should surface the answer.
     let watchedRunId = null;
     executionStore.subscribe((state) => {
+      renderRunContext(state);
       const badge = document.getElementById('active-status-badge');
       if (badge) {
         badge.textContent = state.status;
@@ -2375,6 +2402,9 @@
       ) {
         _lastTerminalRefresh = state.executionId;
         if (state.executionId === watchedRunId) revealOutput();
+        // The list was fetched when the run was selected, before it had any
+        // artifacts, so it kept saying "Artifacts 0" next to a pane listing 11.
+        loadAccordionSection('artifacts');
         getExecutionGraph(state.executionId)
           .then((graph) => {
             if (
