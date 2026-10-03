@@ -589,17 +589,21 @@ body {
 .task-context-header {
   width: 100%;
   max-width: 1312px;
-  height: 92px;
+  /* A fixed 92px single row crushed the task input to 10px, and put the layout
+     buttons on top of Run, once the output pane took 420px of a 1280px screen.
+     It wraps instead. */
+  height: auto;
   min-height: 92px;
-  max-height: 92px;
+  max-height: none;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0 20px;
+  padding: 12px 20px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 9px;
+  gap: 10px 9px;
   box-sizing: border-box;
   flex-shrink: 0;
 }
@@ -609,7 +613,7 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  flex: 1;
+  flex: 1 1 340px;
   min-width: 0;
 }
 
@@ -655,6 +659,7 @@ body {
   max-width: 100%;
   min-width: 0 !important;
   padding: 2px 4px !important;
+  text-overflow: ellipsis;
 }
 .task-context-title-input:hover {
   border-color: var(--border) !important;
@@ -691,9 +696,11 @@ body {
 }
 
 .btn-add-surface {
-  width: 116px;
+  width: auto;
   height: 34px;
   min-width: 116px;
+  padding: 0 14px;
+  white-space: nowrap;
   background: var(--panel-3);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1348,7 +1355,9 @@ input[type="text"].input-error {
 /* Toast Notification System (§52/§54) */
 .toast-container {
   position: fixed;
-  top: 80px;
+  /* Bottom-right: the old top-right spot sat on the Free / Split / Add surface /
+     Share controls and blocked them while a toast was showing. */
+  bottom: 24px;
   right: 24px;
   z-index: 9999;
   display: flex;
@@ -1728,6 +1737,12 @@ input[type="text"].input-error {
   flex-direction: column;
   gap: 6px;
 }
+.modal-field-error {
+  display: none;
+  font-size: 11px;
+  color: var(--err);
+}
+.modal-form-group input.input-error + .modal-field-error { display: block; }
 .modal-form-group label {
   font-size: 11px;
   color: var(--fg-muted);

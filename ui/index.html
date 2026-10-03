@@ -95,7 +95,7 @@
               <span class="sidebar-section-icon">📖</span>
               <span class="sidebar-section-title">Knowledge</span>
               <span class="sidebar-section-count" data-count-for="knowledge">0</span>
-              <button class="sidebar-section-add sidebar-section-dedupe" data-action="dedupe-knowledge" title="Remove duplicate knowledge claims" aria-label="Remove duplicate knowledge claims" type="button">Dedupe</button>
+              <button class="sidebar-section-add sidebar-section-dedupe" data-action="dedupe-knowledge" title="Remove duplicate knowledge claims" aria-label="Remove duplicate knowledge claims" type="button" style="display: none;">Dedupe</button>
             </div>
             <div class="sidebar-section-items" data-items-for="knowledge"></div>
           </div>
@@ -443,6 +443,7 @@
       <div class="modal-form-group">
         <label for="new-workspace-name">Workspace Name</label>
         <input type="text" id="new-workspace-name" placeholder="e.g. security-research" />
+        <div class="modal-field-error" role="alert">Enter a name for the workspace.</div>
       </div>
       <div class="modal-form-group">
         <label for="new-workspace-desc">Description (Optional)</label>
@@ -759,6 +760,31 @@
         e.preventDefault();
         setConsoleOpen(consolePane.classList.contains('pane-collapsed'));
       }
+    });
+
+    // Ctrl/Cmd+K jumps to the resource search, which the placeholder has long
+    // advertised. It works from inside other inputs too.
+    const resourceSearch = document.querySelector('.resource-search-input');
+    if (resourceSearch) {
+      const mac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+      resourceSearch.placeholder = `Search resources ${mac ? '⌘K' : 'Ctrl+K'}`;
+      document.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'k') return;
+        e.preventDefault();
+        if (sidebarToggle.isCollapsed()) sidebarToggle.open();
+        resourceSearch.focus();
+        resourceSearch.select();
+      });
+    }
+
+    // role="button" elements (sidebar sections and items) were focusable but
+    // ignored Enter and Space, so keyboard users could not operate them.
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const el = e.target;
+      if (!el || !el.matches || !el.matches('[role="button"][tabindex="0"]')) return;
+      e.preventDefault();
+      el.click();
     });
 
     // Fullscreen: the stage fills the screen. On entering, the strip is
@@ -1280,6 +1306,9 @@
       const itemsEl = section.querySelector('.sidebar-section-items');
       if (!itemsEl) return;
       if (countEl) countEl.textContent = String(items.length);
+      // "Dedupe" has nothing to act on in an empty list.
+      const dedupeBtn = section.querySelector('.sidebar-section-dedupe');
+      if (dedupeBtn) dedupeBtn.style.display = items.length === 0 ? 'none' : '';
       if (items.length === 0) {
         itemsEl.innerHTML = `<div class="sidebar-empty-note" style="padding:6px 10px 6px 24px;font-size:11px;color:var(--fg-muted);">${escapeHtml(emptyText)}</div>`;
         return;
@@ -1353,10 +1382,14 @@
             return;
           }
           const rows = await getTaskArtifacts(eid);
-          const list = (Array.isArray(rows) ? rows : []).map((a) => ({
-            type: 'artifact', key: String(a.index), name: (a.uri || '').split('/').pop() || `artifact #${a.index}`, icon: '📦',
-            badge: a.type || '', raw: { ...a, taskId: eid },
-          }));
+          const list = (Array.isArray(rows) ? rows : []).map((a) => {
+            const name = (a.uri || '').split('/').pop() || `artifact #${a.index}`;
+            return {
+              type: 'artifact', key: String(a.index), name, icon: '📦',
+              // The type usually repeats the file name, which squeezed it to "sli…".
+              badge: a.type && a.type !== name ? a.type : '', raw: { ...a, taskId: eid },
+            };
+          });
           setAccordionSection(section, list, emptyText);
         }
       } catch {
@@ -1766,6 +1799,7 @@
 
     btnNewWorkspace?.addEventListener('click', () => {
       if (inputWorkspaceName) inputWorkspaceName.value = '';
+      inputWorkspaceName?.classList.remove('input-error');
       if (inputWorkspaceDesc) inputWorkspaceDesc.value = '';
       if (workspaceModal) workspaceModal.style.display = 'flex';
       setTimeout(() => inputWorkspaceName?.focus(), 50);
@@ -1798,10 +1832,13 @@
       }
     });
 
+    inputWorkspaceName?.addEventListener('input', () => inputWorkspaceName.classList.remove('input-error'));
+
     btnSaveWorkspace?.addEventListener('click', async () => {
       const name = inputWorkspaceName?.value.trim();
       if (!name) {
         inputWorkspaceName?.classList.add('input-error');
+        inputWorkspaceName?.focus();
         return;
       }
       btnSaveWorkspace.disabled = true;
@@ -2271,6 +2308,8 @@
 
     // --- Proposal Generation Flow (§52 Product Directive) ---
     const btnProposal = document.getElementById('btn-proposal');
+    // Restored after each request; it used to flip to "Generate proposal" for good.
+    const proposalLabel = btnProposal ? btnProposal.textContent : 'Preview';
     const taskInput = document.getElementById('task-input');
     const proposalBannerContainer = document.getElementById('proposal-banner-container');
 
@@ -2328,7 +2367,7 @@
         });
       } finally {
         btnProposal.disabled = false;
-        btnProposal.textContent = 'Generate proposal';
+        btnProposal.textContent = proposalLabel;
       }
     }
 
