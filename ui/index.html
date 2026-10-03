@@ -188,7 +188,7 @@
               </svg>
             </button>
           </div>
-          <button id="btn-history" class="btn btn-history" title="History">
+          <button id="btn-history" class="btn btn-history" title="Recent runs" aria-haspopup="dialog" aria-expanded="false" aria-controls="history-popover">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <circle cx="8" cy="8" r="6" stroke="#E2E6F0" stroke-width="1.4"/>
               <path d="M8 4.5V8L10.5 10" stroke="#E2E6F0" stroke-width="1.4" stroke-linecap="round"/>
@@ -460,6 +460,7 @@
     </div>
   </div>
 
+  <div id="history-popover" class="history-popover" role="dialog" aria-label="Recent runs" hidden></div>
   <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
   <script type="module">
@@ -1058,8 +1059,77 @@
       executeTask(taskVal);
       showToast({ kind: 'info', title: 'Running Task', message: `Executing workflow: ${taskVal}` });
     });
-    document.getElementById('btn-history')?.addEventListener('click', () => {
-      showToast({ kind: 'info', title: 'Task History', message: 'No previous runs in current session.' });
+    // History: recent runs. This button used to announce "No previous runs in
+    // current session" whether or not any existed, and nothing else in the UI
+    // listed past runs.
+    const btnHistory = document.getElementById('btn-history');
+    const historyPopover = document.getElementById('history-popover');
+
+    function closeHistory() {
+      if (!historyPopover || historyPopover.hidden) return;
+      historyPopover.hidden = true;
+      btnHistory?.setAttribute('aria-expanded', 'false');
+    }
+
+    async function openHistory() {
+      if (!historyPopover || !btnHistory) return;
+      const rect = btnHistory.getBoundingClientRect();
+      historyPopover.style.top = `${Math.round(rect.bottom + 6)}px`;
+      historyPopover.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+      historyPopover.hidden = false;
+      btnHistory.setAttribute('aria-expanded', 'true');
+      historyPopover.innerHTML = '<div class="history-empty">Loading…</div>';
+      try {
+        // GET /tasks lists oldest first: show the latest 12, newest on top.
+        const recent = ((await listTasks()) || []).slice(-12).reverse();
+        if (recent.length === 0) {
+          historyPopover.innerHTML = '<div class="history-empty">No runs yet. Run a task and it will be listed here.</div>';
+          return;
+        }
+        const details = await Promise.all(recent.map((t) => getTask(t.task_id).catch(() => null)));
+        if (historyPopover.hidden) return;
+        const current = executionStore.getState().executionId;
+        historyPopover.innerHTML = '<div class="history-title">Recent runs</div>' + recent.map((t, i) => {
+          const text = ((details[i] && details[i].input) || '').trim() || t.workflow || 'Run';
+          const isCurrent = t.task_id === current;
+          return `<button type="button" class="history-item${isCurrent ? ' is-current' : ''}"${isCurrent ? ' aria-current="true"' : ''} data-task-id="${escapeHtml(t.task_id)}">
+            <span class="status-dot status-dot-${escapeHtml(t.status)}"></span>
+            <span class="history-text" title="${escapeHtml(text)}">${escapeHtml(text)}</span>
+            <span class="history-meta">${escapeHtml(t.status)} · ${escapeHtml(t.task_id.slice(0, 8))}</span>
+          </button>`;
+        }).join('');
+        historyPopover.querySelector('.history-item')?.focus();
+      } catch (err) {
+        historyPopover.innerHTML = `<div class="history-empty">Could not load runs: ${escapeHtml(err.message || String(err))}</div>`;
+      }
+    }
+
+    btnHistory?.addEventListener('click', () => (historyPopover.hidden ? openHistory() : closeHistory()));
+    historyPopover?.addEventListener('click', (e) => {
+      const item = e.target.closest('.history-item');
+      if (!item) return;
+      closeHistory();
+      btnHistory?.focus();
+      selectExecution(item.getAttribute('data-task-id'));
+      inspectorToggle.open();
+    });
+    historyPopover?.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const items = [...historyPopover.querySelectorAll('.history-item')];
+      if (!items.length) return;
+      e.preventDefault();
+      const at = items.indexOf(document.activeElement);
+      items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+    });
+    document.addEventListener('mousedown', (e) => {
+      if (!historyPopover || historyPopover.hidden) return;
+      if (!historyPopover.contains(e.target) && !btnHistory.contains(e.target)) closeHistory();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && historyPopover && !historyPopover.hidden) {
+        closeHistory();
+        btnHistory?.focus();
+      }
     });
     document.getElementById('btn-more-options')?.addEventListener('click', () => {
       showToast({ kind: 'info', title: 'Workspace Settings', message: 'Autosave: Enabled · Runtime: Local v1.0 · Split mode: 2' });
@@ -2452,7 +2522,8 @@
       try {
         const tasks = await listTasks();
         if (tasks && tasks.length > 0) {
-          await selectExecution(tasks[0].task_id);
+          // GET /tasks lists oldest first: reopen the latest run, not the first.
+          await selectExecution(tasks[tasks.length - 1].task_id);
         }
       } catch (_err) {
         /* no runs yet — canvas stays ready in honest empty state */

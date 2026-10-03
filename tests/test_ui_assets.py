@@ -204,3 +204,13 @@ def test_artifact_list_refreshes_when_a_run_finishes(client: TestClient) -> None
     # It was fetched at selection time, before the run produced any artifacts.
     assert "loadAccordionSection('artifacts');" in window
 
+
+def test_history_lists_real_runs_and_reload_opens_the_latest(client: TestClient) -> None:
+    html = client.get("/").text
+    assert 'id="history-popover"' in html
+    # The button used to claim there were no runs whether or not any existed.
+    assert "No previous runs in current session" not in html
+    # GET /tasks lists oldest first; startup opened the first (oldest) run.
+    assert "tasks[tasks.length - 1].task_id" in html
+    assert "tasks[0].task_id" not in html
+
