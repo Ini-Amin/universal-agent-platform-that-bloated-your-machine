@@ -365,6 +365,65 @@ export function buildMarkdownBody(body, spec, emit = () => {}) {
   return body;
 }
 
+const TERMINAL_WS_PATH = '/ws/terminal';
+const WS_CONNECTING = 0;
+const WS_OPEN = 1;
+
+// A browser WebSocket cannot send headers, so the opt-in API token
+// (src/uap/server/auth.py) rides `?token=`, exactly like the canvas socket.
+function terminalToken() {
+  try {
+    return (typeof localStorage !== 'undefined' && localStorage.getItem('uap_api_token')) || '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+// `base` is token-free (safe to emit or show); `url` is what the socket opens.
+// Only the page's own server ever receives the token, never a custom wsUrl host.
+function terminalSocketUrls(spec) {
+  const loc = (typeof window !== 'undefined' && window.location) ? window.location : null;
+  const host = (loc && loc.host) || '127.0.0.1:8090';
+  const proto = (loc && loc.protocol === 'https:') ? 'wss:' : 'ws:';
+  const base = spec.wsUrl || `${proto}//${host}${TERMINAL_WS_PATH}`;
+  const token = terminalToken();
+  if (!token) return { base, url: base };
+  try {
+    const u = new URL(base, loc ? loc.href : undefined);
+    if (u.host !== host || u.searchParams.has('token')) return { base, url: base };
+    u.searchParams.set('token', token);
+    return { base, url: u.toString() };
+  } catch (_e) {
+    return { base, url: base };
+  }
+}
+
+// Plain-words reason a terminal socket is unusable: `text` is short enough for
+// the status line, `hint` is the next step. The server closes with 1000 after
+// `exit` and 1008 for "unauthorized" / "too many concurrent terminal sessions"
+// (src/uap/server/ws.py); 1006 means no close frame ever arrived.
+function describeTerminalClose(code, reason, wasOpen) {
+  const why = String(reason || '').trim();
+  if (code === 1008) {
+    if (/too many/i.test(why)) {
+      return { text: 'Too many concurrent terminal sessions', hint: 'Close an unused terminal, then Reconnect.' };
+    }
+    if (!why || /unauthori[sz]ed/i.test(why)) {
+      return {
+        text: 'Not authorised: set the API token',
+        hint: 'Open the page with ?token=... or set localStorage uap_api_token, then Reconnect.',
+      };
+    }
+    return { text: `Rejected by the server (1008): ${why}` };
+  }
+  if (code === 1000) return { text: (!why || /^session ended$/i.test(why)) ? 'Session ended' : `Session ended (${why})` };
+  if (code === 1001 || code === 1012) return { text: 'The server is shutting down or restarting' };
+  if (code === 1006 || code === undefined) {
+    return { text: wasOpen ? 'Connection lost: the server or network went away' : 'Cannot reach the server' };
+  }
+  return { text: `Disconnected (code ${code}${why ? `: ${why}` : ''})` };
+}
+
 export function buildTerminalBody(body, spec, emit = () => {}) {
   body.classList.add('stage-terminal-body');
 
@@ -383,16 +442,27 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   const statusLabel = document.createElement('span');
   statusLabel.className = 'stage-terminal-status';
   statusLabel.textContent = 'Connecting...';
+  statusLabel.setAttribute('role', 'status');
+
+  const reconnectBtn = document.createElement('button');
+  reconnectBtn.type = 'button';
+  reconnectBtn.className = 'stage-terminal-btn stage-terminal-reconnect-btn';
+  reconnectBtn.textContent = 'Reconnect';
+  reconnectBtn.title = 'Open a fresh shell session';
+  reconnectBtn.style.display = 'none';
 
   statusWrap.appendChild(dot);
   statusWrap.appendChild(statusLabel);
+  statusWrap.appendChild(reconnectBtn);
 
   const metaWrap = document.createElement('div');
   metaWrap.className = 'stage-terminal-meta';
 
   const cwdLabel = document.createElement('span');
   cwdLabel.className = 'stage-terminal-cwd';
-  cwdLabel.textContent = spec.cwd || '~/agent';
+  // The server never reports its directory; do not claim one. `pwd` prints it.
+  cwdLabel.textContent = spec.cwd || 'workspace';
+  cwdLabel.title = spec.cwd ? 'Working directory' : 'The shell runs in the server workspace; run pwd for the full path';
 
   const clearBtn = document.createElement('button');
   clearBtn.type = 'button';
@@ -417,6 +487,7 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   tabProblems.type = 'button';
   tabProblems.className = 'stage-terminal-tab';
   tabProblems.textContent = 'Problems';
+  tabProblems.title = 'Not available: no diagnostics source is connected';
   const tabPlus = document.createElement('button');
   tabPlus.type = 'button';
   tabPlus.className = 'stage-terminal-tab stage-terminal-tab-plus';
@@ -482,7 +553,9 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   problemsView.style.padding = '12px 14px';
   problemsView.style.fontSize = '12px';
   problemsView.style.color = 'var(--fg-muted)';
-  problemsView.innerHTML = '<span style="color: var(--ok); margin-right: 6px;">✓</span> No problems detected in workspace (0 errors, 0 warnings)';
+  problemsView.textContent = 'Not available: no diagnostics source is connected to this terminal.';
+
+  let focusTimer = null;
 
   function setTerminalTab(name, btn) {
     tabs.querySelectorAll('.stage-terminal-tab').forEach(t => t.classList.remove('active'));
@@ -505,7 +578,8 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
       inputForm.style.display = 'flex';
       problemsView.style.display = 'none';
       summary.style.display = 'none';
-      setTimeout(() => inputEl.focus(), 50);
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => inputEl.focus(), 50);
     }
   }
   tabRun.addEventListener('click', () => setTerminalTab('run', tabRun));
@@ -523,28 +597,6 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
     setTerminalTab(`shell-${shellTabNum}`, newTab);
     appendOutput(`\n--- Session shell-${shellTabNum} ---\n${spec.prompt || '$'} `);
   });
-  inputForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const cmd = inputEl.value.trim();
-    if (!cmd) return;
-    appendOutput(`\n${spec.prompt || '$'} ${cmd}\n`);
-    inputEl.value = '';
-    if (socket && isConnected) {
-      socket.send(JSON.stringify({ type: 'input', data: cmd + '\n' }));
-    } else {
-      if (cmd === 'clear') {
-        clearBuffer();
-      } else if (cmd === 'pwd') {
-        appendOutput(`${spec.cwd || '~'}\n`);
-      } else if (cmd === 'ls') {
-        appendOutput('\n');
-      } else if (cmd.startsWith('echo ')) {
-        appendOutput(`${cmd.slice(5)}\n`);
-      } else {
-        appendOutput(`[shell] command executed: ${cmd}\n`);
-      }
-    }
-  });
 
   container.appendChild(tabs);
   container.appendChild(toolbar);
@@ -554,8 +606,9 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   container.appendChild(summary);
   body.appendChild(container);
 
-  let isConnected = false;
   let socket = null;
+  let state = 'connecting';
+  let disposed = false;
 
   function appendOutput(text) {
     const chunk = document.createElement('span');
@@ -578,99 +631,130 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
     appendOutput(initialLog.endsWith('\n') ? initialLog : initialLog + '\n');
   }
 
-  const proto = (typeof window !== 'undefined' && window.location && window.location.protocol === 'https:') ? 'wss:' : 'ws:';
-  const host = (typeof window !== 'undefined' && window.location && window.location.host) ? window.location.host : '127.0.0.1:8090';
-  const defaultWsUrl = `${proto}//${host}/ws/terminal`;
-  const wsUrl = spec.wsUrl || defaultWsUrl;
+  // Input is live only while a real session is open. Nothing is ever answered
+  // client-side, so a dead socket must never look like a working shell.
+  const STATE_DOT = {
+    connecting: 'stage-terminal-dot-connecting',
+    connected: 'stage-terminal-dot-connected',
+    disconnected: 'stage-terminal-dot-disconnected',
+  };
 
-  if (typeof WebSocket !== 'undefined') {
-    try {
-      socket = new WebSocket(wsUrl);
-
-      socket.onopen = () => {
-        isConnected = true;
-        dot.className = 'stage-terminal-dot stage-terminal-dot-connected';
-        statusLabel.textContent = 'Connected';
-        inputEl.placeholder = 'Type shell command and press Enter...';
-        emit({ type: 'terminal_connect', id: spec.__id, kind: 'terminal', wsUrl });
-      };
-
-      socket.onmessage = (event) => {
-        let data = event.data;
-        if (typeof data === 'string') {
-          try {
-            const json = JSON.parse(data);
-            if (json.data) data = json.data;
-            else if (json.message) data = json.message;
-          } catch {
-            // plain string
-          }
-          appendOutput(data);
-        }
-      };
-
-      socket.onerror = () => {
-        isConnected = false;
-        dot.className = 'stage-terminal-dot stage-terminal-dot-error';
-        statusLabel.textContent = 'no terminal backend is configured — this is the client only';
-        appendOutput(
-          `\n\x1b[33m[terminal]\x1b[0m no terminal backend is configured — this is the client only.\n` +
-          `\x1b[90m(attempted connection to ${wsUrl} failed: route does not exist on server)\x1b[0m\n`
-        );
-        emit({
-          type: 'terminal_error',
-          id: spec.__id,
-          kind: 'terminal',
-          message: 'no terminal backend configured',
-          wsUrl,
-        });
-      };
-
-      socket.onclose = () => {
-        if (isConnected) {
-          isConnected = false;
-          dot.className = 'stage-terminal-dot stage-terminal-dot-disconnected';
-          statusLabel.textContent = 'Disconnected';
-        }
-      };
-    } catch (err) {
-      isConnected = false;
-      dot.className = 'stage-terminal-dot stage-terminal-dot-error';
-      statusLabel.textContent = 'no terminal backend is configured — this is the client only';
-      appendOutput(
-        `\n\x1b[33m[terminal]\x1b[0m no terminal backend is configured — this is the client only.\n` +
-        `\x1b[90m(${err.message})\x1b[0m\n`
-      );
-    }
-  } else {
-    dot.className = 'stage-terminal-dot stage-terminal-dot-disconnected';
-    statusLabel.textContent = 'no terminal backend is configured — this is the client only';
+  function setStatus(next, text) {
+    state = next;
+    dot.className = `stage-terminal-dot ${STATE_DOT[next]}`;
+    statusLabel.textContent = text;
+    statusLabel.title = text;
+    const live = next === 'connected';
+    inputEl.disabled = !live;
+    sendBtn.disabled = !live;
+    inputEl.placeholder = live ? 'Type shell command and press Enter...' : 'Not connected: no commands can run';
+    reconnectBtn.style.display = next === 'disconnected' ? '' : 'none';
   }
+
+  function closeSocket() {
+    const s = socket;
+    socket = null;
+    if (!s) return;
+    s.onmessage = s.onerror = s.onclose = null;
+    // Closing a socket that is still connecting makes the browser log a failed
+    // handshake, so let it open first and close it straight away.
+    if (s.readyState === WS_CONNECTING) {
+      s.onopen = () => s.close();
+    } else {
+      s.onopen = null;
+      try { s.close(); } catch (_e) { /* already closed */ }
+    }
+  }
+
+  function connect({ focus = false } = {}) {
+    if (disposed) return;
+    closeSocket();
+    if (typeof WebSocket === 'undefined') {
+      setStatus('disconnected', 'WebSocket is not available here, so the terminal cannot connect');
+      return;
+    }
+    const { base, url } = terminalSocketUrls(spec);
+    setStatus('connecting', 'Connecting...');
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (err) {
+      setStatus('disconnected', `Cannot open the terminal connection: ${err.message}`);
+      return;
+    }
+    socket = ws;
+    let wasOpen = false;
+
+    ws.onopen = () => {
+      wasOpen = true;
+      setStatus('connected', 'Connected');
+      if (focus) inputEl.focus();
+      emit({ type: 'terminal_connect', id: spec.__id, kind: 'terminal', wsUrl: base });
+    };
+
+    ws.onmessage = (event) => {
+      let data = event.data;
+      if (typeof data !== 'string') return;
+      try {
+        const json = JSON.parse(data);
+        // Control frames (pong, the empty stdout `cd` returns) carry no output.
+        if (json && typeof json === 'object') data = json.data || json.message || '';
+      } catch {
+        // plain string
+      }
+      if (data) appendOutput(data);
+    };
+
+    // The close event carries the diagnosis; a bare `error` says nothing useful.
+    ws.onerror = () => {};
+
+    ws.onclose = (event) => {
+      socket = null;
+      const code = event ? event.code : undefined;
+      const { text: message, hint } = describeTerminalClose(code, event ? event.reason : '', wasOpen);
+      setStatus('disconnected', message);
+      appendOutput(`\n\x1b[33m[terminal]\x1b[0m ${message}${hint ? `. ${hint}` : ''}\n`);
+      emit({
+        type: code === 1000 ? 'terminal_disconnect' : 'terminal_error',
+        id: spec.__id,
+        kind: 'terminal',
+        message,
+        code,
+        wsUrl: base,
+      });
+    };
+  }
+
+  reconnectBtn.addEventListener('click', () => {
+    // Marks the attempt, not a success: the shell restarts with no earlier state.
+    appendOutput('\n\x1b[90m[terminal] reconnecting: this starts a new shell session\x1b[0m\n');
+    connect({ focus: true });
+  });
 
   inputForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const command = inputEl.value.trim();
     if (!command) return;
+    if (state !== 'connected' || !socket || socket.readyState !== WS_OPEN) return;
     inputEl.value = '';
-
-    appendOutput(`\x1b[1;36m${promptSpan.textContent}\x1b[0m ${command}\n`);
-
-    if (isConnected && socket && socket.readyState === (typeof WebSocket !== 'undefined' ? WebSocket.OPEN : 1)) {
-      socket.send(JSON.stringify({ type: 'stdin', data: command + '\n' }));
-      emit({ type: 'terminal_input', id: spec.__id, kind: 'terminal', command, connected: true });
-    } else {
-      appendOutput(
-        `\x1b[31m[error]\x1b[0m cannot execute command: no terminal backend is configured — this is the client only.\n`
-      );
-      emit({ type: 'terminal_input', id: spec.__id, kind: 'terminal', command, connected: false });
-    }
+    appendOutput(`\n${spec.prompt || '$'} ${command}\n`);
+    socket.send(JSON.stringify({ type: 'stdin', data: `${command}\n` }));
+    emit({ type: 'terminal_input', id: spec.__id, kind: 'terminal', command, connected: true });
   });
+
+  connect();
 
   body.__terminal = {
     write: appendOutput,
     clear: clearBuffer,
-    isConnected: () => isConnected,
+    isConnected: () => state === 'connected',
     getBuffer: () => buffer.textContent,
+  };
+  // The stage calls this when the card leaves it (close, clear, replace).
+  body.__dispose = () => {
+    disposed = true;
+    clearTimeout(focusTimer);
+    closeSocket();
   };
 
   return body;
@@ -3147,6 +3231,9 @@ export function createStage(containerEl, options = {}) {
     const s = normalize(spec);
     const existing = views.get(s.__id);
     if (existing) {
+      // Release the old body's resources first: a replaced terminal must not
+      // keep its socket (or count against the server's session limit).
+      disposeCard(existing.cardEl);
       const replacement = buildCard(s);
       existing.cardEl.replaceWith(replacement);
       const pos = (s.position && typeof s.position.x === 'number')
@@ -3201,6 +3288,20 @@ export function createStage(containerEl, options = {}) {
     return s.__id;
   }
 
+  // A card body may own live resources (the terminal's WebSocket). It
+  // registers `body.__dispose`; every path that drops a card calls it here.
+  function disposeCard(cardEl) {
+    const body = cardEl && typeof cardEl.querySelector === 'function'
+      ? cardEl.querySelector('.stage-card-body')
+      : null;
+    if (!body || typeof body.__dispose !== 'function') return;
+    try {
+      body.__dispose();
+    } catch (err) {
+      console.error('stage dispose error:', err);
+    }
+  }
+
   function closeView(id) {
     const targetId = String(id);
     const entry = views.get(targetId);
@@ -3209,6 +3310,7 @@ export function createStage(containerEl, options = {}) {
     if (filledViewId === targetId) {
       exitFill();
     }
+    disposeCard(entry.cardEl);
     entry.cardEl.remove();
     views.delete(targetId);
     positions.delete(targetId);
@@ -3241,7 +3343,10 @@ export function createStage(containerEl, options = {}) {
     }
     for (const id of ids) {
       const entry = views.get(id);
-      if (entry) entry.cardEl.remove();
+      if (entry) {
+        disposeCard(entry.cardEl);
+        entry.cardEl.remove();
+      }
       positions.delete(id);
       sizes.delete(id);
       removeStorage(`uap.stage.pos.${id}`);

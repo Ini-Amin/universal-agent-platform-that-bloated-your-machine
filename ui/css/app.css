@@ -2662,6 +2662,18 @@ textarea:focus-visible,
 
 .stage-terminal-btn:hover { border-color: var(--accent); }
 
+.stage-terminal-btn:disabled,
+.stage-terminal-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.stage-terminal-btn:disabled:hover { border-color: var(--border); }
+
+.stage-terminal-reconnect-btn {
+  border-color: var(--accent);
+  flex-shrink: 0;
+}
+
 .stage-terminal-buffer {
   flex: 1;
   min-height: 0;
