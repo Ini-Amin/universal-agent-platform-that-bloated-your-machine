@@ -141,3 +141,19 @@ def test_console_empty_state_and_ws_status(client: TestClient) -> None:
     html = client.get("/").text
     assert "ws-status-badge" in html
 
+
+def test_run_again_reuses_the_selected_task_input(client: TestClient) -> None:
+    html = client.get("/").text
+    assert "executionStore.getState().task?.input?.trim()" in html
+    assert "executeTask(taskVal);" in html
+    assert "No task to repeat" in html
+    assert "document.getElementById('btn-run-task')?.click();" not in html
+
+
+def test_stale_execution_responses_cannot_replace_the_selected_run(client: TestClient) -> None:
+    html = client.get("/").text
+    assert "let executionSelectionVersion = 0;" in html
+    assert "const isCurrentSelection = () =>" in html
+    assert "if (!isCurrentSelection()) return;" in html
+    assert "executionStore.getState().executionId === state.executionId" in html
+
