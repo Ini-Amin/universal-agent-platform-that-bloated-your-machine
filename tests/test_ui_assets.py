@@ -157,3 +157,102 @@ def test_stale_execution_responses_cannot_replace_the_selected_run(client: TestC
     assert "if (!isCurrentSelection()) return;" in html
     assert "executionStore.getState().executionId === state.executionId" in html
 
+
+def _css_rule(css: str, selector: str) -> str:
+    start = css.index(f"{selector} {{")
+    return css[start : css.index("}", start)]
+
+
+def test_output_pane_sits_beside_the_canvas_not_below_it(client: TestClient) -> None:
+    css = client.get("/css/app.css").text
+    rule = _css_rule(css, ".operator-workspace")
+    # A flex column stacked the output pane and event console below the fold,
+    # and a hard-coded width left a dead strip when the sidebar collapsed.
+    assert "display: grid;" in rule
+    assert "100vw - 240px" not in rule
+    assert '"canvas  output"' in rule
+    assert "grid-area: output" in css
+    assert "grid-area: console" in css
+
+
+def test_output_and_event_console_have_visible_toggles(client: TestClient) -> None:
+    html = client.get("/").text
+    # The old controls lived in a display:none block, so Ctrl+I was the only way in.
+    assert 'id="btn-toggle-output"' in html
+    assert 'id="btn-toggle-events"' in html
+    assert "revealOutput()" in html
+    assert "setConsoleOpen" in html
+    # The console toggle flipped `collapsed` while the pane is hidden by
+    # `pane-collapsed`, so it could never open.
+    assert "consolePane.classList.toggle('collapsed')" not in html
+    assert "key.toLowerCase() === 'j'" in html
+
+
+def test_header_describes_the_selected_run(client: TestClient) -> None:
+    html = client.get("/").text
+    # "Ready to run" used to be static markup, so it never changed after a run.
+    assert "function renderRunContext(state)" in html
+    assert "renderRunContext(state);" in html
+    # Nothing to repeat until a run (and its task text) is selected.
+    assert 'id="btn-run-again" class="btn btn-run-again" title="Run a task first" disabled' in html
+
+
+def test_artifact_list_refreshes_when_a_run_finishes(client: TestClient) -> None:
+    html = client.get("/").text
+    marker = "_lastTerminalRefresh = state.executionId;"
+    window = html[html.index(marker) : html.index(marker) + 600]
+    # It was fetched at selection time, before the run produced any artifacts.
+    assert "loadAccordionSection('artifacts');" in window
+
+
+def test_history_lists_real_runs_and_reload_opens_the_latest(client: TestClient) -> None:
+    html = client.get("/").text
+    assert 'id="history-popover"' in html
+    # The button used to claim there were no runs whether or not any existed.
+    assert "No previous runs in current session" not in html
+    # GET /tasks lists oldest first; startup opened the first (oldest) run.
+    assert "tasks[tasks.length - 1].task_id" in html
+    assert "tasks[0].task_id" not in html
+
+
+def test_chrome_controls_do_not_make_things_up(client: TestClient) -> None:
+    html = client.get("/").text
+    # The status label was static markup: "Sandbox connected" with the server down.
+    assert "async function checkConnection(" in html
+    assert "Sandbox unreachable" in html
+    # Invented settings toast, and a share toast that claimed success unconditionally.
+    assert "Autosave: Enabled" not in html
+    assert "Runtime: Local v1.0" not in html
+    assert "Workspace link copied to clipboard." not in html
+    assert "Could not copy" in html
+    # The account pill and gear advertised menus that did not exist.
+    assert 'role="button" tabindex="0" title="Account profile"' not in html
+    assert "account-chevrons" not in html
+    # "Don't show again" was a one-way door; the help button reopens the guide.
+    assert 'id="btn-help"' in html
+    assert "stage.showGuide()" in html
+    assert "showGuide:" in client.get("/js/stage.js").text
+
+
+def test_task_header_wraps_instead_of_collapsing(client: TestClient) -> None:
+    css = client.get("/css/app.css").text
+    header = _css_rule(css, ".task-context-header")
+    # A fixed 92px single row crushed the task input to 10px once the output
+    # pane took 420px of a 1280px screen.
+    assert "flex-wrap: wrap;" in header
+    assert "max-height: 92px" not in header
+    assert "white-space: nowrap" in _css_rule(css, ".btn-add-surface")
+    # Top-right toasts sat on the layout / Add surface / Share controls.
+    assert "bottom: 24px" in _css_rule(css, ".toast-container")
+
+
+def test_keyboard_access_and_small_label_fixes(client: TestClient) -> None:
+    html = client.get("/").text
+    assert "key.toLowerCase() !== 'k'" in html  # Ctrl/Cmd+K, advertised by the placeholder
+    assert '[role="button"][tabindex="0"]' in html  # Enter/Space on role=button elements
+    # Preview used to relabel itself "Generate proposal" for good.
+    assert "btnProposal.textContent = proposalLabel;" in html
+    assert "btnProposal.textContent = 'Generate proposal';" not in html
+    assert "a.type !== name" in html  # artifact badge repeated the file name
+    assert 'class="modal-field-error"' in html  # empty workspace name had no message
+
