@@ -266,6 +266,17 @@ installed — re-run the two commands above.
 
 ### Step 2D — Or use Supabase instead of a local database
 
+> **Project `juphdyjspijoukrpfryx` is already provisioned** (2026-10-03):
+> pgvector 0.8.2 enabled, all migrations applied (`alembic_version` at
+> `f8b2c3d4e5f6`; 20 tables / 49 indexes / 14 FKs, verified column-identical
+> against a local `alembic upgrade head`), and a least-privilege `uap` role
+> created with the same grants as Step 2B. To use it: fill `<REGION>` in the
+> `DATABASE_URL` line of `.env` (gitignored; dashboard → Project Settings →
+> Database → Connection string → Session pooler), uncomment it, then
+> `set -a; source .env; set +a`. Re-running `alembic upgrade head` against it
+> is a no-op until new migrations land. RLS is off on these tables by design —
+> the app connects directly, so do not expose them via the Data API anon key.
+
 Supabase gives you a hosted PostgreSQL with **pgvector already available**, so
 you can skip Steps 2A–2C entirely and run the app with ~92 MB of local RAM
 instead of ~270 MB. Everything UAP needs is supported: PostgreSQL 17, `pgvector`,
