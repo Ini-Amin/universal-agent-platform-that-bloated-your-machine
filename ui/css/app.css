@@ -1064,144 +1064,6 @@ textarea:focus-visible,
   border-left: 4px solid var(--warn);
 }
 
-/* Basic Responsiveness (<960px and <720px) */
-@media (max-width: 960px) {
-  .pane-sidebar {
-    width: 220px;
-  }
-  .pane-inspector {
-    width: 260px;
-  }
-  .canvas-toolbar {
-    flex-wrap: wrap;
-    height: auto;
-    padding: 8px 12px;
-  }
-}
-
-@media (max-width: 720px) {
-  .pane-sidebar {
-    width: 170px;
-  }
-  .pane-inspector {
-    width: 220px;
-  }
-  .ide-header {
-    padding: 0 10px;
-  }
-  .workspace-label {
-    display: none;
-  }
-}
-
-/* Phone. The three fixed-width panes cannot fit side by side in ~390px, so
-   the layout stacks: the canvas keeps the top half, the sidebar and inspector
-   share the bottom. Measured before this rule: scrollWidth 534 vs clientWidth
-   390 (144px of horizontal overflow, verified in a real browser 2026-10-03). */
-@media (max-width: 560px) {
-  .ide-container {
-    width: 100%;          /* 100vw includes the scrollbar and overflows */
-    overflow-x: hidden;
-  }
-  .ide-header {
-    height: auto;
-    min-height: 42px;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 6px 10px;
-  }
-  .ide-header .logo span {
-    display: none;        /* "Visual Operating Environment" — noise at 390px */
-  }
-  .header-status {
-    font-size: 11px;
-    flex-wrap: wrap;
-  }
-  .workspace-picker {
-    flex-wrap: wrap;
-  }
-  .ide-body {
-    flex-direction: column;
-  }
-  .pane-sidebar,
-  .pane-inspector {
-    width: 100%;
-    max-width: 100%;
-    flex: 0 0 auto;
-    max-height: 30vh;
-    border-left: none;
-    border-right: none;
-    border-top: 1px solid var(--border);
-  }
-  .pane-canvas {
-    flex: 1 1 auto;
-    min-height: 40vh;
-    width: 100%;
-  }
-  .canvas-toolbar {
-    flex-wrap: wrap;
-    height: auto;
-    padding: 6px 8px;
-  }
-  /* These two are the actual overflow sources at 390px (measured with
-     getBoundingClientRect: .toolbar-group 421px, .header-status 228px in a
-     390px viewport). Both are plain flex rows with no wrap, so their children
-     push the document wider than the screen. */
-  .toolbar-group,
-  .header-status {
-    flex-wrap: wrap;
-    min-width: 0;
-    max-width: 100%;
-  }
-  .task-examples {
-    width: 100%;
-    order: 3;          /* chips drop below the input on a phone */
-  }
-  .task-example {
-    max-width: 100%;
-  }
-  .header-status {
-    font-size: 11px;
-  }
-  /* Nothing may push the page wider than the viewport. */
-  .pane-sidebar *,
-  .pane-inspector * {
-    max-width: 100%;
-  }
-  /* Tool palette & empty state phone layout */
-  .btn-tools {
-    min-height: 44px;
-    min-width: 44px;
-  }
-  .tool-palette-popover {
-    left: 8px !important;
-    right: 8px !important;
-    width: auto !important;
-    max-width: calc(100vw - 16px) !important;
-  }
-  .stage-empty-actions {
-    grid-template-columns: repeat(2, 1fr) !important;
-    gap: 8px !important;
-  }
-  .stage-empty-tool-btn {
-    min-height: 56px !important;
-    padding: 8px 6px !important;
-  }
-  .tool-palette-item {
-    min-height: 48px;
-  }
-  .tool-field-input {
-    min-height: 44px;
-  }
-  .tool-palette-cancel,
-  .tool-palette-submit {
-    min-height: 44px;
-  }
-  .stage-empty-state {
-    width: calc(100% - 16px) !important;
-    padding: 16px 12px !important;
-  }
-}
 
 
 /* ==========================================================================
@@ -1426,6 +1288,101 @@ textarea:focus-visible,
   min-width: 48px;
   font-weight: 600;
   color: var(--fg-muted);
+}
+
+/* --- [SplitPane] Region layout ---------------------------------------------
+   Free canvas keeps the transformed grid; split mode turns the same element
+   into a CSS grid whose tracks are driven by --split-x/--split-y (set by the
+   stage). Cards are re-parented into regions and keep their existing
+   absolutely-positioned styling, now relative to the region element. */
+.stage-root.stage-split-active .stage-zoom-controls {
+  display: none; /* pan/zoom do not apply to a fixed region grid */
+}
+
+.stage-grid-split {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: var(--split-x, 1fr) 6px var(--split-x2, 1fr);
+  grid-template-rows: 1fr;
+}
+
+.stage-grid-split-4 {
+  grid-template-columns: var(--split-x, 1fr) 6px var(--split-x2, 1fr);
+  grid-template-rows: var(--split-y, 1fr) 6px var(--split-y2, 1fr);
+}
+
+.stage-region {
+  position: relative; /* cards position against their region */
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(22, 27, 34, 0.55);
+}
+
+.stage-region-label {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 1;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.stage-region.is-drop-target {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.stage-split-divider {
+  z-index: 2;
+  background: var(--border);
+  cursor: col-resize;
+}
+
+.stage-split-divider[data-axis="y"] {
+  cursor: row-resize;
+}
+
+.stage-split-divider:hover,
+.stage-root.stage-split-resizing .stage-split-divider {
+  background: var(--accent);
+}
+
+.stage-root.stage-split-resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.stage-root.stage-split-resizing iframe {
+  pointer-events: none;
+}
+
+/* Space-to-pan and dragging semantics exist only for the free canvas. */
+.stage-root.stage-split-active.stage-space-ready {
+  cursor: default;
+}
+
+/* Toolbar layout segmented control */
+.stage-layout-group {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.btn-layout[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel-3);
+  font-weight: 600;
 }
 
 .stage-card-titlebar {
@@ -2199,19 +2156,6 @@ textarea:focus-visible,
 .stage-editor-files-error { padding: 10px; color: var(--fg-muted); font-size: 11px; }
 .stage-editor-files-error { color: var(--err); }
 
-@media (max-width: 560px) {
-  .stage-terminal-input-bar {
-    min-height: 52px;
-  }
-  .stage-terminal-btn,
-  .stage-editor-btn,
-  .stage-editor-output-close {
-    min-height: 44px;
-    min-width: 44px;
-    padding: 8px 12px;
-  }
-  .stage-editor-files { width: 150px; }
-}
 /* --- Placeholder (never fail silently) --- */
 .stage-placeholder {
   display: flex;
@@ -2341,30 +2285,6 @@ body.stage-fullscreen .stage-exit-fs { display: block; }
 .canvas-stage-area:fullscreen { background: var(--bg); }
 .canvas-stage-area:-webkit-full-screen { background: var(--bg); }
 
-/* Phone: the strip stays but the stage takes the width. */
-/* Phone: the strip stays but the stage takes the width without horizontal page scroll. */
-@media (max-width: 560px) {
-  .node-strip { width: 64px; }
-  .stage { padding: 0 !important; overflow: hidden !important; }
-  .stage-card { max-width: calc(100vw - 20px); }
-  .stage-zoom-controls {
-    bottom: 10px;
-    right: 10px;
-    gap: 4px;
-  }
-  .stage-zoom-btn,
-  .stage-zoom-level {
-    min-height: 44px;
-    min-width: 44px;
-    font-size: 13px;
-    padding: 8px 12px;
-  }
-}
-
-@media (max-width: 420px) {
-  .canvas-stage-area { overflow: hidden; }
-  .stage { width: 100%; max-width: 100%; overflow: hidden; }
-}
 
 /* ==========================================================================
    [ExcalidrawCanvas] fill mode: full-bleed view taking over the entire stage
