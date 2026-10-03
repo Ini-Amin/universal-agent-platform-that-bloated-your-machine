@@ -11,35 +11,38 @@
 </head>
 <body>
   <div class="ide-container">
-    <!-- Top Header -->
-    <header class="ide-header">
-      <div style="display: flex; align-items: center; gap: 20px;">
-        <div class="logo">UAP <span>Visual Operating Environment</span></div>
-        <div class="workspace-picker">
-          <label for="workspace-select" class="workspace-label">Workspace:</label>
-          <select id="workspace-select" class="workspace-select">
-            <option value="">Default (in-memory)</option>
-          </select>
-          <button id="btn-new-workspace" class="btn btn-sm" title="Create Workspace">+ New</button>
+    <!-- 1. Left Resource Sidebar (240x1024) -->
+    <aside id="sidebar" class="pane pane-sidebar" data-pane="sidebar">
+      <!-- Platform Identity (240x72) -->
+      <div class="sidebar-identity">
+        <div class="brand-mark">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M9 1.5L1.5 5.25L9 9L16.5 5.25L9 1.5Z" stroke="#FFFFFF" stroke-width="1.4" stroke-linejoin="round"/>
+            <path d="M1.5 9L9 12.75L16.5 9" stroke="#FFFFFF" stroke-width="1.4" stroke-linejoin="round"/>
+            <path d="M1.5 12.75L9 16.5L16.5 12.75" stroke="#FFFFFF" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
         </div>
+        <div class="platform-name">
+          <span class="platform-title">UAP</span>
+          <span class="platform-subtitle">VISUAL OPERATING ENVIRONMENT</span>
+        </div>
+        <button id="btn-collapse-sidebar" class="sidebar-collapse-btn" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <path d="M7 2L3.5 5.5L7 9" stroke="#C8CDDB" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
-      <div class="header-status">
-        <span id="active-task-label" class="font-mono text-muted">No task selected</span>
-        <span id="active-status-badge" class="badge">idle</span>
-        <span id="ws-status-badge" class="badge badge-idle" title="Live execution stream connection">stream: idle</span>
-        <!-- AGPL-3.0 section 13: users interacting with this software over a
-             network must be offered a way to obtain its source. -->
-        <a id="source-link" class="source-link"
-           href="https://github.com/Ini-Amin/universal-agent-platform-that-bloated-your-machine"
-           target="_blank" rel="noopener noreferrer"
-           title="Source code (AGPL-3.0)">Source</a>
-      </div>
-    </header>
 
-    <!-- Main 3-Pane Body (§52) -->
-    <div class="ide-body">
-      <!-- 1. Left Sidebar Pane (§52) -->
-      <aside id="sidebar" class="pane pane-sidebar" data-pane="sidebar">
+      <!-- Resources (240x860) -->
+      <div class="sidebar-resources">
+        <div class="resource-search-wrap">
+          <svg class="resource-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <circle cx="7" cy="7" r="5" stroke="#9AA1B4" stroke-width="1.4"/>
+            <path d="M11 11L14.5 14.5" stroke="#9AA1B4" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          <input type="text" class="resource-search-input" placeholder="Search resources..." aria-label="Search resources" />
+        </div>
+
         <div class="sidebar-nav-container">
           <nav class="sidebar-nav-menu">
             <button class="sidebar-nav-btn active" data-nav="canvas">
@@ -86,50 +89,164 @@
             <!-- Dynamic list injected here based on active nav -->
           </div>
         </div>
-      </aside>
+      </div>
 
-      <!-- 2. Center Canvas Pane (§52/§55) -->
-      <main id="canvas" class="pane pane-canvas" data-pane="canvas">
-        <div class="canvas-toolbar">
-          <div class="toolbar-group">
-            <input type="text" id="task-input" aria-label="Task description" placeholder="What do you want to research?" />
-            <button id="btn-proposal" class="btn" title="Preview the workflow before running it">Preview</button>
-            <button id="btn-run-task" class="btn btn-accent">Run</button>
-            <button id="btn-tools-palette" class="btn btn-tools" type="button" title="Open tools palette (Whiteboard, Terminal, Editor, Video, Image, Note, Search)" aria-haspopup="dialog" aria-expanded="false">+ Tools</button>
+      <!-- Sidebar spacer (240x1) -->
+      <div class="sidebar-spacer"></div>
+
+      <!-- Runtime environment (240x91) -->
+      <div class="runtime-environment">
+        <div class="env-status-row">
+          <div class="env-status-indicator">
+            <span class="status-dot"></span>
+            <span class="status-label">Environment ready</span>
           </div>
-          <!-- Clickable examples. A first-time user does not know what this
-               accepts; the supported domains are research and bug bounty only,
-               so showing real working inputs is more useful than a placeholder. -->
-          <div id="task-examples" class="task-examples" aria-label="Example tasks">
-            <span class="task-examples-label">Try:</span>
-            <button class="task-example" data-task="research vector databases for RAG">research vector databases for RAG</button>
-            <button class="task-example" data-task="research checkpoint strategies for agent workflows">research checkpoint strategies</button>
-            <button class="task-example" data-task="bug bounty on example.com">bug bounty on example.com</button>
+          <button class="env-settings-btn" title="Environment settings" aria-label="Settings">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <circle cx="5" cy="5" r="3.5" stroke="#9AA1B4" stroke-width="1.2"/>
+              <path d="M5 0.5V2M5 8V9.5M0.5 5H2M8 5H9.5" stroke="#9AA1B4" stroke-width="1.2"/>
+            </svg>
+          </button>
+        </div>
+        <div class="account-pill" role="button" tabindex="0" title="Account profile">
+          <div class="account-avatar">OA</div>
+          <div class="account-info">
+            <span class="account-name">Operator</span>
+            <span class="account-role">Admin</span>
           </div>
-          <div class="toolbar-group">
-            <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
-            <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
-            <span class="toolbar-sep"></span>
-            <button id="btn-zoom-in" class="btn" title="Zoom In">+</button>
-            <button id="btn-zoom-out" class="btn" title="Zoom Out">-</button>
-            <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
-            <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
-            <span class="toolbar-sep"></span>
-            <!-- [SplitPane] Layout: free canvas (default) or 2/4 regions. The
-                 stage persists the choice; the active button mirrors state on
-                 load and on clicks, not just one or the other. -->
+          <div class="account-chevrons">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3.5 4.5L6 2L8.5 4.5M3.5 7.5L6 10L8.5 7.5" stroke="#9AA1B4" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 2. Operator Workspace (1360x1024) -->
+    <div class="operator-workspace">
+      <!-- Workspace Toolbar (1360x72) -->
+      <header class="ide-header workspace-toolbar">
+        <div class="workspace-nav-left">
+          <div class="workspace-selector-group">
+            <svg class="panels-icon" width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <rect x="2" y="2" width="12" height="12" rx="2" stroke="#E2E6F0" stroke-width="1.4"/>
+              <line x1="7" y1="2" x2="7" y2="14" stroke="#E2E6F0" stroke-width="1.4"/>
+              <line x1="2" y1="7" x2="7" y2="7" stroke="#E2E6F0" stroke-width="1.4"/>
+            </svg>
+            <div class="workspace-picker">
+              <label for="workspace-select" class="workspace-label" style="display: none;">Workspace:</label>
+              <select id="workspace-select" class="workspace-select">
+                <option value="">UAP (Default)</option>
+              </select>
+              <button id="btn-new-workspace" class="btn btn-sm btn-workspace-new" title="Create Workspace">+ New</button>
+            </div>
+          </div>
+          <span class="toolbar-divider"></span>
+          <div class="env-badge">Local v1.0</div>
+        </div>
+
+        <div class="workspace-nav-right">
+          <div class="run-status-indicator">
+            <span class="status-dot"></span>
+            <span id="active-status-badge" class="badge">idle</span>
+            <span id="active-task-label" class="run-time-text font-mono">00:42</span>
+          </div>
+          <span class="toolbar-divider"></span>
+          <button id="btn-history" class="btn btn-history" title="History">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="6" stroke="#E2E6F0" stroke-width="1.4"/>
+              <path d="M8 4.5V8L10.5 10" stroke="#E2E6F0" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+            <span>History</span>
+          </button>
+          <button id="btn-run-again" class="btn btn-run-again">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+              <path d="M3 2L12 7L3 12V2Z" fill="#1E1E1E"/>
+            </svg>
+            <span>Run again</span>
+          </button>
+          <button id="btn-more-options" class="btn btn-icon-only" title="More options">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="2" cy="6" r="1.2" fill="#9AA1B4"/>
+              <circle cx="6" cy="6" r="1.2" fill="#9AA1B4"/>
+              <circle cx="10" cy="6" r="1.2" fill="#9AA1B4"/>
+            </svg>
+          </button>
+          <span id="ws-status-badge" class="badge badge-idle" style="display: none;" title="Live execution stream connection">stream: idle</span>
+          <a id="source-link" class="source-link"
+             href="https://github.com/Ini-Amin/universal-agent-platform-that-bloated-your-machine"
+             target="_blank" rel="noopener noreferrer"
+             title="Source code (AGPL-3.0)">Source</a>
+        </div>
+      </header>
+
+      <!-- Infinite Canvas (1360x952) -->
+      <main id="canvas" class="pane pane-canvas infinite-canvas" data-pane="canvas">
+        <!-- Task context header (1312x92) -->
+        <section class="task-context-header">
+          <div class="task-context-desc">
+            <div class="task-context-breadcrumb">
+              <span class="crumb-label">WORKSPACE</span>
+              <span class="crumb-sep">›</span>
+              <span class="crumb-label">BUILD SESSION</span>
+            </div>
+            <div class="task-context-title-row">
+              <input type="text" id="task-input" class="task-context-title-input"
+                     aria-label="Task description" value="Autonomous Hunt &amp; Build Session"
+                     placeholder="What do you want to research?" />
+              <button id="btn-proposal" class="btn btn-sm btn-proposal-subtle" title="Preview the workflow before running it">Preview</button>
+              <button id="btn-run-task" class="btn btn-accent" style="display: none;">Run</button>
+            </div>
+            <div class="task-context-subline">
+              <span id="task-context-meta">Builder agent · React + TypeScript · Last run just now</span>
+            </div>
+          </div>
+
+          <div class="task-context-actions">
             <div class="stage-layout-group" role="group" aria-label="Stage layout">
-              <button id="btn-layout-free" class="btn btn-layout" data-layout="0" aria-pressed="true" title="Free canvas (default)">Free</button>
-              <button id="btn-layout-2" class="btn btn-layout" data-layout="2" aria-pressed="false" title="Split into 2 regions">Split&nbsp;2</button>
+              <button id="btn-layout-free" class="btn btn-layout" data-layout="0" aria-pressed="false" title="Free canvas">Free</button>
+              <button id="btn-layout-2" class="btn btn-layout is-active" data-layout="2" aria-pressed="true" title="Split into 2 regions (default)">Split&nbsp;2</button>
               <button id="btn-layout-4" class="btn btn-layout" data-layout="4" aria-pressed="false" title="Split into 4 regions">Split&nbsp;4</button>
             </div>
-            <span class="toolbar-sep"></span>
-            <button id="btn-toggle-sidebar" class="btn" title="Hide the left sidebar (Ctrl+B)">◧ Side</button>
-            <button id="btn-toggle-inspector" class="btn" title="Hide the right panel (Ctrl+I)">Panel ◨</button>
-            <span class="toolbar-sep"></span>
-            <button id="btn-toggle-strip" class="btn" title="Hide the workflow strip">Strip</button>
-            <button id="btn-fullscreen-stage" class="btn" title="Fullscreen the stage">Fullscreen</button>
+            <button id="btn-tools-palette" class="btn btn-add-surface" type="button" title="Add surface" aria-haspopup="dialog" aria-expanded="false">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                <path d="M7 1V13M1 7H13" stroke="#E2E6F0" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+              <span>Add surface</span>
+            </button>
+            <button id="btn-share-canvas" class="btn btn-share" type="button" title="Share session">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <circle cx="4" cy="8" r="2.5" stroke="#E2E6F0" stroke-width="1.3"/>
+                <circle cx="12" cy="4" r="2.5" stroke="#E2E6F0" stroke-width="1.3"/>
+                <circle cx="12" cy="12" r="2.5" stroke="#E2E6F0" stroke-width="1.3"/>
+                <path d="M6 7L10 5M6 9L10 11" stroke="#E2E6F0" stroke-width="1.3"/>
+              </svg>
+              <span>Share</span>
+            </button>
           </div>
+        </section>
+
+        <!-- Clickable examples -->
+        <div id="task-examples" class="task-examples" aria-label="Example tasks" style="display: none;">
+          <span class="task-examples-label">Try:</span>
+          <button class="task-example" data-task="research vector databases for RAG">research vector databases for RAG</button>
+          <button class="task-example" data-task="research checkpoint strategies for agent workflows">research checkpoint strategies</button>
+          <button class="task-example" data-task="bug bounty on example.com">bug bounty on example.com</button>
+        </div>
+
+        <!-- Hidden canvas controls kept for contracts / shortcuts -->
+        <div class="stage-canvas-controls-hidden" style="display: none;">
+          <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
+          <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
+          <button id="btn-zoom-in" class="btn" title="Zoom In">+</button>
+          <button id="btn-zoom-out" class="btn" title="Zoom Out">-</button>
+          <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
+          <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
+          <button id="btn-toggle-sidebar" class="btn" title="Hide the left sidebar (Ctrl+B)">◧ Side</button>
+          <button id="btn-toggle-inspector" class="btn" title="Hide the right panel (Ctrl+I)">Panel ◨</button>
+          <button id="btn-toggle-strip" class="btn" title="Hide the workflow strip">Strip</button>
+          <button id="btn-fullscreen-stage" class="btn" title="Fullscreen the stage">Fullscreen</button>
         </div>
 
         <!-- Tool Palette Popover (§Tools Directive) -->
@@ -246,7 +363,7 @@
         <!-- Canvas-as-stage: the centre hosts real tool views; the workflow
              graph becomes a narrow navigation strip. The collapse handle only
              appears when the stage is fullscreen (left edge hover). -->
-        <div class="canvas-stage-area">
+        <div class="canvas-stage-area workspace-columns">
           <button id="strip-reveal" class="strip-reveal" type="button"
                   aria-label="Show workflow strip" title="Show workflow strip">›</button>
           <button id="btn-exit-fullscreen" class="stage-exit-fs" type="button" title="Exit fullscreen">Exit fullscreen</button>
@@ -260,33 +377,33 @@
 
         <!-- The node graph renderer still owns this element; it is kept off
              screen so node selection/zoom logic keeps working. -->
-        <div id="graph-canvas-container" class="canvas-viewport-container" aria-hidden="true"></div>
+        <div id="graph-canvas-container" class="canvas-viewport-container" aria-hidden="true" style="display: none;"></div>
       </main>
 
-      <!-- 3. Right Inspector Pane (§52/§53) -->
-      <aside id="inspector" class="pane pane-inspector" data-pane="inspector">
+      <!-- 3. Right Inspector Pane (§52/§53) (collapsed by default) -->
+      <aside id="inspector" class="pane pane-inspector pane-collapsed" data-pane="inspector" style="display: none;">
         <div id="inspector-content"></div>
       </aside>
-    </div>
 
-    <!-- 4. Bottom Event Console Pane (§45/§52) -->
-    <section id="console" class="pane pane-console" data-pane="console">
-      <div class="console-header">
-        <div class="console-tabs" role="tablist" aria-label="Event console sections">
-          <button id="btn-tab-events" class="console-tab-btn active" data-tab="events" role="tab" aria-selected="true" aria-controls="console-events">Events</button>
-          <button id="btn-tab-traces" class="console-tab-btn" data-tab="traces" role="tab" aria-selected="false" aria-controls="console-traces">Traces</button>
-          <button id="btn-tab-artifacts" class="console-tab-btn" data-tab="artifacts" role="tab" aria-selected="false" aria-controls="console-artifacts">Artifacts</button>
-          <button id="btn-tab-controls" class="console-tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="console-controls">Runtime Controls</button>
+      <!-- 4. Bottom Event Console Pane (§45/§52) (collapsed by default) -->
+      <section id="console" class="pane pane-console pane-collapsed" data-pane="console" style="display: none;">
+        <div class="console-header">
+          <div class="console-tabs" role="tablist" aria-label="Event console sections">
+            <button id="btn-tab-events" class="console-tab-btn active" data-tab="events" role="tab" aria-selected="true" aria-controls="console-events">Events</button>
+            <button id="btn-tab-traces" class="console-tab-btn" data-tab="traces" role="tab" aria-selected="false" aria-controls="console-traces">Traces</button>
+            <button id="btn-tab-artifacts" class="console-tab-btn" data-tab="artifacts" role="tab" aria-selected="false" aria-controls="console-artifacts">Artifacts</button>
+            <button id="btn-tab-controls" class="console-tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="console-controls">Runtime Controls</button>
+          </div>
+          <button id="btn-toggle-console" class="btn btn-sm">Toggle</button>
         </div>
-        <button id="btn-toggle-console" class="btn btn-sm">Toggle</button>
-      </div>
-      <div id="console-body" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
-        <div id="console-events" class="console-content" role="tabpanel" aria-label="Events" style="display: block;"></div>
-        <div id="console-traces" class="console-content" role="tabpanel" aria-label="Traces" style="display: none; padding: 8px;"></div>
-        <div id="console-artifacts" class="console-content" role="tabpanel" aria-label="Artifacts" style="display: none; padding: 8px;"></div>
-        <div id="console-controls" class="console-content" role="tabpanel" aria-label="Runtime Controls" style="display: none; padding: 12px;"></div>
-      </div>
-    </section>
+        <div id="console-body" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+          <div id="console-events" class="console-content" role="tabpanel" aria-label="Events" style="display: block;"></div>
+          <div id="console-traces" class="console-content" role="tabpanel" aria-label="Traces" style="display: none; padding: 8px;"></div>
+          <div id="console-artifacts" class="console-content" role="tabpanel" aria-label="Artifacts" style="display: none; padding: 8px;"></div>
+          <div id="console-controls" class="console-content" role="tabpanel" aria-label="Runtime Controls" style="display: none; padding: 12px;"></div>
+        </div>
+      </section>
+    </div>
   </div>
 
   <!-- New Workspace Modal Dialog -->
@@ -408,7 +525,7 @@
     // Initialize the Stage (§52/§55 canvas-as-stage). The centre hosts real
     // tool views; the graph above becomes a narrow navigation strip.
     const stageEl = document.getElementById('stage');
-    const stage = createStage(stageEl);
+    const stage = createStage(stageEl, { defaultSplitMode: 2 });
     // The canvas code editor is a real Monaco-backed editor (ui/js/editor.js)
     // with a workspace file browser and "Open in Zed". stage.js stays
     // dependency-free; the editor builder is injected here. If Monaco cannot
@@ -838,6 +955,41 @@
       saveUserViews(activeUserViews);
     }
 
+    // Seed default views on initial startup if none saved
+    try {
+      if (localStorage.getItem(USER_VIEWS_KEY) === null && activeUserViews.length === 0) {
+        activeUserViews = [
+          {
+            id: 'default-editor',
+            kind: 'editor',
+            title: 'App.tsx',
+            filename: 'App.tsx',
+            language: 'typescript',
+            code: `import React, { useState } from 'react';\n\nexport function App() {\n  const [count, setCount] = useState(0);\n  return (\n    <div className="p-4">\n      <h1 className="text-xl font-bold">Usage Dashboard</h1>\n      <button onClick={() => setCount(c => c + 1)}>Count: {count}</button>\n    </div>\n  );\n}\n`,
+          },
+          {
+            id: 'default-terminal',
+            kind: 'terminal',
+            title: 'Terminal',
+            cwd: '~/workspace/usage-dashboard',
+            prompt: '$',
+          },
+          {
+            id: 'default-preview',
+            kind: 'iframe',
+            title: 'Live preview',
+            url: 'http://localhost:3000',
+          },
+          {
+            id: 'default-handoff',
+            kind: 'handoff',
+            title: 'Agent Handoff',
+          },
+        ];
+        saveUserViews(activeUserViews);
+      }
+    } catch (_e) {}
+
     // Restore saved user views on startup
     if (activeUserViews.length > 0) {
       for (const spec of activeUserViews) {
@@ -848,6 +1000,20 @@
         }
       }
     }
+
+    // Sidebar & toolbar controls
+    document.getElementById('btn-collapse-sidebar')?.addEventListener('click', () => {
+      document.getElementById('sidebar')?.classList.toggle('pane-collapsed');
+    });
+    document.getElementById('btn-run-again')?.addEventListener('click', () => {
+      document.getElementById('btn-run-task')?.click();
+    });
+    document.querySelector('.resource-search-input')?.addEventListener('input', (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      document.querySelectorAll('#sidebar-content .list-item').forEach((item) => {
+        item.style.display = item.textContent.toLowerCase().includes(q) ? '' : 'none';
+      });
+    });
 
     // Wire stage events for persistence and tool input requests
     stage.onEvent((evt) => {

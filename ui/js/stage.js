@@ -19,6 +19,7 @@ const KIND_TITLES = {
   whiteboard: 'Whiteboard',
   terminal: 'Terminal',
   editor: 'Editor',
+  handoff: 'Agent Handoff',
   placeholder: 'View',
 };
 
@@ -402,9 +403,31 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   metaWrap.appendChild(cwdLabel);
   metaWrap.appendChild(clearBtn);
 
+  const tabs = document.createElement('div');
+  tabs.className = 'stage-terminal-tabs';
+  const tabRun = document.createElement('button');
+  tabRun.type = 'button';
+  tabRun.className = 'stage-terminal-tab active';
+  tabRun.textContent = 'Run output';
+  const tabShell = document.createElement('button');
+  tabShell.type = 'button';
+  tabShell.className = 'stage-terminal-tab';
+  tabShell.textContent = 'Shell';
+  const tabProblems = document.createElement('button');
+  tabProblems.type = 'button';
+  tabProblems.className = 'stage-terminal-tab';
+  tabProblems.textContent = 'Problems';
+  const tabPlus = document.createElement('button');
+  tabPlus.type = 'button';
+  tabPlus.className = 'stage-terminal-tab stage-terminal-tab-plus';
+  tabPlus.textContent = '+';
+  tabs.appendChild(tabRun);
+  tabs.appendChild(tabShell);
+  tabs.appendChild(tabProblems);
+  tabs.appendChild(tabPlus);
+
   toolbar.appendChild(statusWrap);
   toolbar.appendChild(metaWrap);
-
   const buffer = document.createElement('pre');
   buffer.className = 'stage-terminal-buffer';
   buffer.tabIndex = 0;
@@ -434,9 +457,22 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   inputForm.appendChild(inputEl);
   inputForm.appendChild(sendBtn);
 
+  const summary = document.createElement('div');
+  summary.className = 'stage-terminal-summary';
+  const summaryLeft = document.createElement('span');
+  summaryLeft.className = 'stage-terminal-summary-left';
+  summaryLeft.textContent = 'Process exited successfully';
+  const summaryRight = document.createElement('span');
+  summaryRight.className = 'stage-terminal-summary-right';
+  summaryRight.textContent = 'Exit code 0 · 42s · 6 tool calls';
+  summary.appendChild(summaryLeft);
+  summary.appendChild(summaryRight);
+
+  container.appendChild(tabs);
   container.appendChild(toolbar);
   container.appendChild(buffer);
   container.appendChild(inputForm);
+  container.appendChild(summary);
   body.appendChild(container);
 
   let isConnected = false;
@@ -900,7 +936,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   return _buildFallbackEditorBody(body, spec, emit);
 }
 
-export function createStage(containerEl) {
+export function createStage(containerEl, options = {}) {
   if (!containerEl) throw new Error('createStage: a container element is required');
 
   containerEl.classList.add('stage-root', 'stage-canvas-host');
@@ -933,10 +969,12 @@ export function createStage(containerEl) {
   const SPLIT_KEY = 'uap.stage.split';
   const SPLIT_MIN_FRACTION = 0.15;
 
+  const defaultMode = (options && typeof options.defaultSplitMode === 'number') ? options.defaultSplitMode : 0;
   function loadSplitMode() {
     const raw = getStorage(`${SPLIT_KEY}.mode`);
-    const mode = raw === null ? 0 : Number(raw);
-    return mode === 2 || mode === 4 ? mode : 0;
+    if (raw === null) return defaultMode;
+    const mode = Number(raw);
+    return mode === 2 || mode === 4 ? mode : (mode === 0 ? 0 : defaultMode);
   }
 
   function loadSplitRatios() {
@@ -1200,8 +1238,17 @@ export function createStage(containerEl) {
 
   function loadSplitRegion(id) {
     const raw = getStorage(`${SPLIT_KEY}.region.${id}`);
-    const r = raw === null ? 0 : Number(raw);
-    return Number.isFinite(r) && r >= 0 && r < splitMode ? r : 0;
+    if (raw !== null) {
+      const r = Number(raw);
+      if (Number.isFinite(r) && r >= 0 && r < splitMode) return r;
+    }
+    const entry = views.get(String(id));
+    const kind = entry?.spec?.kind;
+    if (splitMode === 2) {
+      if (kind === 'iframe' || kind === 'whiteboard' || kind === 'note' || kind === 'handoff') return 1;
+      return 0;
+    }
+    return 0;
   }
 
   function loadSplitPosition(id) {
@@ -1309,6 +1356,21 @@ export function createStage(containerEl) {
     grid.style.setProperty('--split-y2', fr(1 - splitRatios.y));
   }
 
+  function defaultSplitPos(id, region) {
+    const entry = views.get(String(id));
+    const kind = entry?.spec?.kind;
+    if (splitMode === 2) {
+      if (region === 0) {
+        if (kind === 'terminal') return { x: 0, y: 406 };
+        return { x: 0, y: 0 };
+      } else if (region === 1) {
+        if (kind === 'handoff' || kind === 'note') return { x: 0, y: 607 };
+        return { x: 0, y: 0 };
+      }
+    }
+    return splitCascadePos(region);
+  }
+
   // Place one card inside its region. `pos` wins for drops; otherwise the
   // remembered region-local position or the cascade default is used.
   function placeCardInRegion(id, region, pos) {
@@ -1321,7 +1383,7 @@ export function createStage(containerEl) {
     }
     const next = pos
       ? clampPosToRegion(entry.cardEl, region, pos)
-      : (loadSplitPosition(targetId) || splitCascadePos(region));
+      : (loadSplitPosition(targetId) || defaultSplitPos(targetId, region));
     splitPositions.set(targetId, next);
     setStorage(`${SPLIT_KEY}.region.${targetId}`, String(region));
     setStorage(`${SPLIT_KEY}.pos.${targetId}`, JSON.stringify(next));
@@ -2315,6 +2377,51 @@ export function createStage(containerEl) {
 
       case 'iframe': {
         if (!spec.url) return missing(body, 'iframe', '`url`');
+        const controls = document.createElement('div');
+        controls.className = 'stage-browser-controls';
+
+        const btnBack = document.createElement('button');
+        btnBack.type = 'button';
+        btnBack.className = 'stage-browser-btn stage-browser-back';
+        btnBack.title = 'Back';
+        btnBack.textContent = '‹';
+
+        const btnReload = document.createElement('button');
+        btnReload.type = 'button';
+        btnReload.className = 'stage-browser-btn stage-browser-reload';
+        btnReload.title = 'Reload';
+        btnReload.textContent = '↻';
+
+        const addressBar = document.createElement('div');
+        addressBar.className = 'stage-browser-address-bar';
+
+        const lockIcon = document.createElement('span');
+        lockIcon.className = 'stage-browser-lock';
+        lockIcon.textContent = '🔒';
+
+        const urlText = document.createElement('span');
+        urlText.className = 'stage-browser-url-text';
+        urlText.textContent = spec.url;
+
+        addressBar.appendChild(lockIcon);
+        addressBar.appendChild(urlText);
+
+        const btnCopy = document.createElement('button');
+        btnCopy.type = 'button';
+        btnCopy.className = 'stage-browser-btn stage-browser-copy';
+        btnCopy.title = 'Copy URL';
+        btnCopy.textContent = 'Copy';
+        btnCopy.addEventListener('click', async () => {
+          await copyText(spec.url);
+          btnCopy.textContent = 'Copied';
+          setTimeout(() => { btnCopy.textContent = 'Copy'; }, 1500);
+        });
+
+        controls.appendChild(btnBack);
+        controls.appendChild(btnReload);
+        controls.appendChild(addressBar);
+        controls.appendChild(btnCopy);
+
         const frame = document.createElement('iframe');
         frame.className = 'stage-iframe';
         frame.src = spec.url;
@@ -2331,7 +2438,69 @@ export function createStage(containerEl) {
           frame.setAttribute('sandbox', DEFAULT_IFRAME_SANDBOX);
         }
         if (spec.allow) frame.setAttribute('allow', spec.allow);
+
+        btnReload.addEventListener('click', () => {
+          try { frame.src = spec.url; } catch (_e) {}
+        });
+
+        body.appendChild(controls);
         body.appendChild(frame);
+        return body;
+      }
+
+      case 'handoff': {
+        const wrap = document.createElement('div');
+        wrap.className = 'stage-handoff-body';
+
+        const heading = document.createElement('div');
+        heading.className = 'stage-handoff-heading';
+
+        const identity = document.createElement('div');
+        identity.className = 'stage-handoff-identity';
+        identity.innerHTML = `
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="1.5" y="1.5" width="9" height="9" rx="2" stroke="#C8CDDB" stroke-width="1.2"/><path d="M4 6H8M6 4V8" stroke="#C8CDDB" stroke-width="1.2"/></svg>
+          <span style="font-weight: 600;">Builder agent</span>
+          <span style="color: var(--fg-muted); font-size: 9px;">just now</span>
+        `;
+
+        const status = document.createElement('div');
+        status.className = 'stage-handoff-status';
+        status.innerHTML = `
+          <span class="status-dot"></span>
+          <span>8 / 8 tests passed</span>
+        `;
+
+        heading.appendChild(identity);
+        heading.appendChild(status);
+
+        const summary = document.createElement('div');
+        summary.className = 'stage-handoff-summary';
+        summary.textContent = spec.summary || 'Task completed successfully. All unit tests passed and changes verified in sandbox environment.';
+
+        const promptRow = document.createElement('form');
+        promptRow.className = 'stage-handoff-prompt';
+        promptRow.innerHTML = `
+          <input type="text" class="stage-handoff-input" placeholder="Ask follow-up or give instruction..." />
+          <button type="submit" class="stage-handoff-send" aria-label="Send">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2 7H12M12 7L7 2M12 7L7 12" stroke="#DD7FD3" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        `;
+        promptRow.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const input = promptRow.querySelector('.stage-handoff-input');
+          const val = input?.value?.trim();
+          if (val) {
+            emit({ type: 'handoff_prompt', text: val });
+            if (input) input.value = '';
+          }
+        });
+
+        wrap.appendChild(heading);
+        wrap.appendChild(summary);
+        wrap.appendChild(promptRow);
+        body.appendChild(wrap);
         return body;
       }
 
