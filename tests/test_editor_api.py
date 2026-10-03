@@ -667,3 +667,225 @@ def test_editor_uses_selected_roots_absolute_path(
     assert result.status_code == 200, result.text
     assert launched[0][0] == [sys.executable, str(other / "file.py")]
     assert launched[0][1]["cwd"] == str(other)
+
+
+# --------------------------------------------------------------------------- #
+# 10. Dynamic root registration, deletion, and persistence
+# --------------------------------------------------------------------------- #
+
+def test_add_workspace_root_success_and_delete(
+    client: TestClient, tmp_path: Path
+) -> None:
+    new_dir = tmp_path / "my_project"
+    new_dir.mkdir()
+    (new_dir / "index.ts").write_text("console.log('hi');\n", encoding="utf-8")
+
+    res = client.post(
+        "/api/workspace/roots",
+        json={"path": str(new_dir), "label": "My Project"},
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["label"] == "My Project"
+    assert data["path"] == str(new_dir.resolve())
+    root_id = data["id"]
+    assert root_id == "my_project"
+
+    roots = client.get("/api/workspace/roots").json()["roots"]
+    assert any(r["id"] == root_id and r["label"] == "My Project" for r in roots)
+
+    # Can list and read in the newly registered root
+    listing = client.get("/api/workspace/files", params={"root": root_id})
+    assert listing.status_code == 200
+    assert [e["name"] for e in listing.json()["entries"]] == ["index.ts"]
+
+    content = client.get(
+        "/api/workspace/file", params={"root": root_id, "path": "index.ts"}
+    )
+    assert content.status_code == 200
+    assert content.json()["content"] == "console.log('hi');\n"
+
+    # DELETE removes the added root
+    delete_res = client.delete(f"/api/workspace/roots/{root_id}")
+    assert delete_res.status_code == 200
+    assert delete_res.json() == {"deleted": True, "id": root_id}
+
+    roots_after = client.get("/api/workspace/roots").json()["roots"]
+    assert not any(r["id"] == root_id for r in roots_after)
+
+
+def test_add_workspace_root_dedupes_by_resolved_path(
+    client: TestClient, tmp_path: Path
+) -> None:
+    p = tmp_path / "proj"
+    p.mkdir()
+    res1 = client.post("/api/workspace/roots", json={"path": str(p), "label": "P1"})
+    assert res1.status_code == 200
+    id1 = res1.json()["id"]
+
+    # Re-adding the same directory returns the existing registration
+    res2 = client.post("/api/workspace/roots", json={"path": str(p), "label": "P2"})
+    assert res2.status_code == 200
+    assert res2.json()["id"] == id1
+    assert res2.json()["label"] == "P1"
+
+
+def test_add_workspace_root_rejections(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from uap.server.auth import Identity
+
+    # 1. Relative path rejected with 400
+    rel = client.post("/api/workspace/roots", json={"path": "some/relative/path"})
+    assert rel.status_code == 400
+    assert "path must be absolute" in rel.json()["detail"]
+
+    # 2. File path rejected with 400
+    f = tmp_path / "not_a_dir.txt"
+    f.write_text("hello")
+    file_res = client.post("/api/workspace/roots", json={"path": str(f)})
+    assert file_res.status_code == 400
+    assert "not a directory" in file_res.json()["detail"]
+
+    # 3. Missing path rejected with 400
+    missing_res = client.post(
+        "/api/workspace/roots", json={"path": str(tmp_path / "does_not_exist")}
+    )
+    assert missing_res.status_code == 400
+    assert "does not exist" in missing_res.json()["detail"]
+
+    # 4. Viewer role rejected with 403
+    valid_dir = tmp_path / "valid"
+    valid_dir.mkdir()
+    monkeypatch.setattr(
+        app_mod,
+        "get_current_identity",
+        lambda _conn: Identity(
+            user_id="v", name="Viewer", role="viewer", is_bootstrap=False
+        ),
+    )
+    viewer_res = client.post(
+        "/api/workspace/roots", json={"path": str(valid_dir)}
+    )
+    assert viewer_res.status_code == 403
+    assert "viewers cannot modify workspace roots" in viewer_res.json()["detail"]
+
+
+def test_delete_workspace_root_rejections(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from uap.server.auth import Identity
+
+    # Cannot delete built-ins
+    for builtin in ("workspace", "home"):
+        res = client.delete(f"/api/workspace/roots/{builtin}")
+        assert res.status_code == 400
+        assert f"cannot delete built-in workspace root '{builtin}'" in res.json()["detail"]
+
+    # Cannot delete unknown root
+    res_unknown = client.delete("/api/workspace/roots/nonexistent_root_id")
+    assert res_unknown.status_code == 404
+    assert "unknown workspace root" in res_unknown.json()["detail"]
+
+    # Viewer role rejected with 403
+    monkeypatch.setattr(
+        app_mod,
+        "get_current_identity",
+        lambda _conn: Identity(
+            user_id="v", name="Viewer", role="viewer", is_bootstrap=False
+        ),
+    )
+    viewer_del = client.delete("/api/workspace/roots/some_id")
+    assert viewer_del.status_code == 403
+
+
+def test_added_root_persistence_across_app_restart(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    custom = tmp_path / "external_project"
+    custom.mkdir()
+    (custom / "app.py").write_text("print('external')\n")
+
+    # App 1: add the root
+    app1 = create_app(runs_dir=runs, run_inline=True, workspace_dir=ws)
+    with TestClient(app1) as c1:
+        res = c1.post(
+            "/api/workspace/roots", json={"path": str(custom), "label": "External"}
+        )
+        assert res.status_code == 200
+        root_id = res.json()["id"]
+
+    # App 2: simulate server restart with same runs_dir
+    app2 = create_app(runs_dir=runs, run_inline=True, workspace_dir=ws)
+    with TestClient(app2) as c2:
+        roots = c2.get("/api/workspace/roots").json()["roots"]
+        matching = [r for r in roots if r["id"] == root_id]
+        assert len(matching) == 1
+        assert matching[0]["label"] == "External"
+        assert matching[0]["path"] == str(custom.resolve())
+
+        # Files are readable in app2
+        read_res = c2.get(
+            "/api/workspace/file", params={"root": root_id, "path": "app.py"}
+        )
+        assert read_res.status_code == 200
+        assert read_res.json()["content"] == "print('external')\n"
+
+
+def test_added_root_confinement_and_symlink_escape(
+    client: TestClient, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    secret_file = outside / "secret.env"
+    secret_file.write_text("SUPER_SECRET=123\n")
+
+    added = tmp_path / "added_root"
+    added.mkdir()
+    safe_file = added / "safe.txt"
+    safe_file.write_text("safe content\n")
+
+    # Symlink pointing outside the root
+    symlink_target = added / "leak_link"
+    os.symlink(secret_file, symlink_target)
+
+    res = client.post("/api/workspace/roots", json={"path": str(added), "label": "Added"})
+    assert res.status_code == 200
+    rid = res.json()["id"]
+
+    # Listing marks the symlink as not contained
+    listing = client.get("/api/workspace/files", params={"root": rid}).json()
+    link_entry = next(e for e in listing["entries"] if e["name"] == "leak_link")
+    assert link_entry["contained"] is False
+
+    # Safe file is readable
+    safe_res = client.get(
+        "/api/workspace/file", params={"root": rid, "path": "safe.txt"}
+    )
+    assert safe_res.status_code == 200
+    assert safe_res.json()["content"] == "safe content\n"
+
+    # Symlink escape is refused with 400
+    escaped = client.get(
+        "/api/workspace/file", params={"root": rid, "path": "leak_link"}
+    )
+    assert escaped.status_code == 400
+    assert "escapes the workspace root" in escaped.json()["detail"]
+
+    # Path traversal outside root is refused with 400
+    traversal = client.get(
+        "/api/workspace/file", params={"root": rid, "path": "../outside_dir/secret.env"}
+    )
+    assert traversal.status_code == 400
+    assert "escapes the workspace root" in traversal.json()["detail"]
+
+    # Writing to symlink or traversal is refused
+    write_esc = client.post(
+        "/api/workspace/file",
+        json={"root": rid, "path": "leak_link", "content": "overwrite"},
+    )
+    assert write_esc.status_code == 400
+    assert "escapes the workspace root" in write_esc.json()["detail"]
+    assert secret_file.read_text() == "SUPER_SECRET=123\n"

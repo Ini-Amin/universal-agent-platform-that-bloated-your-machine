@@ -1992,7 +1992,7 @@ textarea:focus-visible,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 12px;
+  padding: 4px 85px 4px 12px;
   background: var(--panel-2);
   border-top: 1px solid var(--border);
   font-size: 11px;
@@ -2081,7 +2081,230 @@ textarea:focus-visible,
   text-transform: uppercase;
 }
 
-.stage-editor-statusbar .stage-editor-engine { margin-left: 8px; }
+.stage-editor-statusbar .stage-editor-engine { margin-left: 0; }
+.stage-editor-statusbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+.stage-editor-statusbar-left .stage-editor-status-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage-editor-statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.stage-editor-encoding {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.stage-editor-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+.stage-editor-tabs {
+  display: flex;
+  align-items: center;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 32px;
+  padding: 0 4px;
+  gap: 2px;
+}
+.stage-editor-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: var(--panel);
+  color: var(--fg-muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  max-width: 200px;
+  transition: background 0.1s, color 0.1s;
+}
+.stage-editor-tab:hover {
+  background: var(--panel-3);
+  color: var(--fg);
+}
+.stage-editor-tab.is-active {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: var(--border);
+  border-bottom: 1px solid var(--bg);
+  margin-bottom: -1px;
+  font-weight: 600;
+}
+.stage-editor-tab-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.stage-editor-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage-editor-tab-dirty {
+  color: var(--accent);
+  font-size: 9px;
+  line-height: 1;
+}
+.stage-editor-tab-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 10px;
+  padding: 1px 3px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.stage-editor-tab-close:hover {
+  background: var(--panel-3);
+  color: var(--err);
+}
+.stage-editor-breadcrumbs {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  gap: 6px;
+  overflow-x: auto;
+  white-space: nowrap;
+  min-height: 22px;
+}
+.stage-editor-crumb-item {
+  color: var(--fg-muted);
+}
+.stage-editor-crumb-item.is-current {
+  color: var(--fg);
+  font-weight: 500;
+}
+.stage-editor-crumb-sep {
+  color: var(--border);
+  font-size: 10px;
+}
+.stage-editor-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  background: var(--bg);
+  height: 100%;
+}
+.stage-editor-empty-icon {
+  font-size: 32px;
+  opacity: 0.4;
+}
+.stage-editor-empty-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+.stage-editor-root-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 4px;
+}
+.stage-editor-files-open-folder {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.stage-editor-files-open-folder:hover { color: var(--accent); }
+.stage-editor-open-folder-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.stage-editor-open-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.stage-editor-open-folder-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.stage-editor-open-folder-submit {
+  padding: 2px 8px;
+  font-size: 11px;
+  min-height: 24px;
+}
+.stage-editor-recent-select {
+  width: 100%;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 4px;
+}
+.stage-editor-file-twistie {
+  font-size: 8px;
+  color: var(--fg-muted);
+  width: 10px;
+  display: inline-block;
+  text-align: center;
+  flex-shrink: 0;
+}
+.stage-editor-file-item.is-active {
+  background: var(--panel-3);
+  color: var(--accent);
+  font-weight: 600;
+}
 
 .stage-editor-zed-btn {
   background: var(--panel-3);

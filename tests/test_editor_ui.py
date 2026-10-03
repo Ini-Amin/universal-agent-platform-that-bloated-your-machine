@@ -378,3 +378,143 @@ def test_editor_monaco_path_under_real_dom(tmp_path: Path) -> None:
 def test_editor_cdn_blocked_falls_back_honestly(tmp_path: Path) -> None:
     """Given a failing loader, the textarea fallback says why -- never blank."""
     _run_bun_script(tmp_path, _FALLBACK_SCRIPT, "ALL_EDITOR_FALLBACK_OK")
+
+
+_TREE_TABS_SCRIPT = _PRELUDE + r"""
+let monacoVal = "# Python Sandbox\nprint('hello')\n";
+const fakeInstance = {
+  getValue: () => monacoVal,
+  setValue: (v) => {
+    monacoVal = v;
+    if (fakeInstance._onContent) fakeInstance._onContent();
+  },
+  onDidChangeModelContent: (cb) => { fakeInstance._onContent = cb; },
+  onDidChangeCursorPosition: () => {},
+  addCommand: () => {},
+  getModel: () => ({ __model: true }),
+  focus: () => {},
+};
+window.monaco = {
+  editor: {
+    create: (el, opts) => { fakeInstance.opts = opts; return fakeInstance; },
+    setModelLanguage: () => {},
+  },
+  KeyMod: { CtrlCmd: 1 },
+  KeyCode: { KeyS: 2, Enter: 3 },
+};
+
+const oldFetch = globalThis.fetch;
+globalThis.fetch = async (url, opts = {}) => {
+  if (url.startsWith("/api/workspace/files") && url.includes("path=pkg")) {
+    return jsonResponse({
+      path: "pkg", root: "/ws", truncated: false,
+      entries: [{ name: "mod.py", path: "pkg/mod.py", is_dir: false, size: 15, contained: true }],
+    });
+  }
+  if (url.startsWith("/api/workspace/file?") && (url.includes("path=pkg%2Fmod.py") || url.includes("path=pkg/mod.py"))) {
+    return jsonResponse({ path: "pkg/mod.py", size: 15, content: "x = 1\n" });
+  }
+  if (url.startsWith("/api/workspace/file?") && url.includes("path=other.py")) {
+    return jsonResponse({ path: "other.py", size: 12, content: "y = 2\n" });
+  }
+  return oldFetch(url, opts);
+};
+const { buildEditorBody } = await import("./editor.js");
+const host = document.getElementById("host");
+const body = buildEditorBody(host, { language: "python", filename: "main.py", code: "# Python Sandbox\nprint('hello')\n" }, () => {});
+
+// 1. Initial render has 2 lines of code (default fix verification)
+const val = body.__editor.getValue().trim();
+check("initial code has 2 lines", val.split("\n").length === 2);
+check("first line is Python Sandbox", val.split("\n")[0].includes("# Python Sandbox"));
+check("second line is print", val.split("\n")[1].includes("print"));
+
+// 2. Status bar has Ln/Col, encoding, language
+check("pos has Ln/Col", /Ln \d+, Col \d+/.test(body.querySelector(".stage-editor-pos").textContent));
+check("encoding is UTF-8", body.querySelector(".stage-editor-encoding")?.textContent === "UTF-8");
+check("lang is python", body.querySelector(".stage-editor-lang")?.textContent.toLowerCase() === "python");
+
+// 3. Tabs bar exists and has initial tab
+check("tabs bar exists", body.querySelector(".stage-editor-tabs") !== null);
+const initialTabs = body.querySelectorAll(".stage-editor-tab");
+check("one initial tab", initialTabs.length === 1);
+check("initial tab filename is main.py", initialTabs[0].textContent.includes("main.py"));
+
+// 4. Breadcrumbs exist and show root
+check("breadcrumbs row exists", body.querySelector(".stage-editor-breadcrumbs") !== null);
+
+// 5. Wait for file browser listing
+for (let i = 0; i < 100; i++) {
+  if (body.querySelectorAll(".stage-editor-file-item").length >= 2) break;
+  await new Promise((r) => setTimeout(r, 20));
+}
+const itemsBefore = body.querySelectorAll(".stage-editor-file-item");
+check("tree initial items", itemsBefore.length === 2);
+
+// 6. Click directory pkg to expand in place
+itemsBefore[0].click();
+for (let i = 0; i < 100; i++) {
+  if (body.querySelectorAll(".stage-editor-file-item").length >= 3) break;
+  await new Promise((r) => setTimeout(r, 20));
+}
+const itemsAfter = body.querySelectorAll(".stage-editor-file-item");
+check("tree expanded in place (3 items)", itemsAfter.length === 3);
+check("parent pkg still in place", itemsAfter[0].textContent.includes("pkg"));
+check("child mod.py present", itemsAfter[1].textContent.includes("mod.py"));
+check("child indented deeper than parent",
+  parseInt(itemsAfter[1].style.paddingLeft) > parseInt(itemsAfter[0].style.paddingLeft));
+
+// 7. Open child mod.py into a tab
+itemsAfter[1].click();
+for (let i = 0; i < 100; i++) {
+  if (body.__editor.getPath() === "pkg/mod.py") break;
+  await new Promise((r) => setTimeout(r, 20));
+}
+check("mod.py opened into tab", body.__editor.getPath() === "pkg/mod.py");
+
+// 8. Open another file (other.py) via openFile
+await body.__editor.openFile("other.py");
+check("other.py opened", body.__editor.getPath() === "other.py");
+const threeTabs = body.querySelectorAll(".stage-editor-tab");
+check("3 tabs open", threeTabs.length >= 2);
+
+// 9. Edit active tab (other.py)
+body.__editor.setValue("y = 99\n");
+check("dirty dot shown on other.py tab",
+  body.querySelector(".stage-editor-tab.is-active .stage-editor-tab-dirty")?.style.display !== "none");
+
+// 10. Switch back to mod.py tab
+const modTab = Array.from(body.querySelectorAll(".stage-editor-tab")).find(t => t.textContent.includes("mod.py"));
+check("found mod.py tab", !!modTab);
+modTab.click();
+check("active tab is mod.py", body.__editor.getPath() === "pkg/mod.py");
+
+// 11. Switch back to other.py: edits preserved!
+const otherTab = Array.from(body.querySelectorAll(".stage-editor-tab")).find(t => t.textContent.includes("other.py"));
+check("found other.py tab", !!otherTab);
+otherTab.click();
+check("active tab is other.py", body.__editor.getPath() === "other.py");
+check("other.py edits preserved", body.__editor.getValue().includes("99"));
+
+// 12. Close a tab with confirm
+window.confirm = () => true;
+const otherCloseBtn = otherTab.querySelector(".stage-editor-tab-close");
+otherCloseBtn.click();
+for (let i = 0; i < 50; i++) {
+  if (!Array.from(body.querySelectorAll(".stage-editor-tab")).some(t => t.textContent.includes("other.py"))) break;
+  await new Promise((r) => setTimeout(r, 20));
+}
+check("other.py closed", !Array.from(body.querySelectorAll(".stage-editor-tab")).some(t => t.textContent.includes("other.py")));
+
+if (failures.length) {
+  console.error("FAILURES: " + failures.join(", "));
+  process.exit(1);
+}
+console.log("ALL_TREE_TABS_OK");
+"""
+
+
+@pytestmark_dom
+def test_editor_tree_and_tabs_under_real_dom(tmp_path: Path) -> None:
+    """Tree expands in place; tabs preserve edits and dirty state; status bar renders."""
+    _run_bun_script(tmp_path, _TREE_TABS_SCRIPT, "ALL_TREE_TABS_OK")

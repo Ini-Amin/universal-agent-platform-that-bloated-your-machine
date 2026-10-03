@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -241,6 +242,12 @@ class EditorStatusResponse(BaseModel):
     available: bool
     binary: str
     reason: str
+
+class WorkspaceRootAddRequest(BaseModel):
+    """Body of ``POST /api/workspace/roots``."""
+
+    path: str
+    label: str | None = None
 # --------------------------------------------------------------------------- #
 # Run bookkeeping
 # --------------------------------------------------------------------------- #
@@ -543,6 +550,70 @@ def _workspace_roots(workspace_dir: Path) -> dict[str, Path]:
         configured[identifier] = resolved
     return configured
 
+def _load_persisted_roots(
+    roots: dict[str, Path],
+    labels: dict[str, str],
+    store_path: Path,
+) -> None:
+    if not store_path.is_file():
+        return
+    try:
+        data = json.loads(store_path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            path_str = item.get("path")
+            if not path_str or not isinstance(path_str, str):
+                continue
+            p = Path(path_str).resolve()
+            if not p.is_dir():
+                continue
+            if p in roots.values():
+                continue
+            label = str(item.get("label") or p.name or str(p))
+            base_id = str(
+                item.get("id")
+                or re.sub(r"[^a-zA-Z0-9_-]", "_", label.lower()).strip("_")
+                or "root"
+            )
+            root_id = base_id
+            counter = 1
+            while root_id in roots:
+                counter += 1
+                root_id = f"{base_id}_{counter}"
+            roots[root_id] = p
+            labels[root_id] = label
+    except Exception as exc:
+        logger.warning(
+            "Failed to load persisted workspace roots from %s: %s", store_path, exc
+        )
+
+
+def _save_persisted_roots(
+    roots: dict[str, Path],
+    labels: dict[str, str],
+    builtins: set[str],
+    store_path: Path,
+) -> None:
+    to_save = []
+    for rid, rpath in roots.items():
+        if rid in builtins:
+            continue
+        to_save.append({
+            "id": rid,
+            "label": labels.get(rid, rid),
+            "path": str(rpath),
+        })
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text(json.dumps(to_save, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning(
+            "Failed to save persisted workspace roots to %s: %s", store_path, exc
+        )
+
 def confine_workspace_path(path: str, root: Path) -> Path:
     """Resolve ``path`` under ``root`` and refuse anything that escapes it.
 
@@ -793,6 +864,14 @@ def create_app(
         Path(workspace_dir).resolve() if workspace_dir is not None else _workspace_root()
     )
     app.state.workspace_roots = _workspace_roots(app.state.workspace_dir)
+    app.state.builtin_workspace_roots = set(app.state.workspace_roots.keys())
+    app.state.workspace_root_labels = {k: k for k in app.state.workspace_roots}
+    app.state.workspace_roots_file = runs_root.parent / "workspace_roots.json"
+    _load_persisted_roots(
+        app.state.workspace_roots,
+        app.state.workspace_root_labels,
+        app.state.workspace_roots_file,
+    )
     app.state.gate = gate
     app.state.entry = entry
     app.state.router = router
@@ -3202,21 +3281,133 @@ def create_app(
 
     @app.get("/api/workspace/roots")
     async def list_workspace_roots(request: Request) -> dict[str, Any]:
+        labels = getattr(request.app.state, "workspace_root_labels", {})
         return {
             "roots": [
-                {"id": identifier, "label": identifier, "path": str(path)}
+                {
+                    "id": identifier,
+                    "label": labels.get(identifier, identifier),
+                    "path": str(path),
+                }
                 for identifier, path in request.app.state.workspace_roots.items()
             ]
         }
 
-    def _require_editor_writer(request: Request) -> None:
+    def _require_editor_writer(
+        request: Request,
+        detail: str = "forbidden: viewers cannot open files in the editor",
+    ) -> None:
         """Auth gate for editor side effects: viewers are refused."""
         identity = get_current_identity(request)
         if identity is not None and identity.role == "viewer":
             raise HTTPException(
                 status_code=403,
-                detail="forbidden: viewers cannot open files in the editor",
+                detail=detail,
             )
+
+    @app.post("/api/workspace/roots")
+    async def add_workspace_root(
+        request: Request, body: WorkspaceRootAddRequest
+    ) -> dict[str, Any]:
+        """Register a new workspace root directory at runtime."""
+        _require_editor_writer(
+            request, detail="forbidden: viewers cannot modify workspace roots"
+        )
+        if not body.path or not isinstance(body.path, str):
+            raise HTTPException(
+                status_code=400, detail="path must be a non-empty string"
+            )
+        if "\x00" in body.path:
+            raise HTTPException(status_code=400, detail="path must not contain NUL bytes")
+        candidate = Path(body.path.strip())
+        if not candidate.is_absolute():
+            raise HTTPException(
+                status_code=400, detail=f"path must be absolute: {body.path!r}"
+            )
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"could not resolve path: {exc}"
+            ) from exc
+
+        if not resolved.exists():
+            raise HTTPException(
+                status_code=400, detail=f"directory does not exist: {body.path!r}"
+            )
+        if not resolved.is_dir():
+            raise HTTPException(
+                status_code=400, detail=f"path is not a directory: {body.path!r}"
+            )
+
+        roots = request.app.state.workspace_roots
+        labels = getattr(request.app.state, "workspace_root_labels", {})
+        builtins = getattr(request.app.state, "builtin_workspace_roots", set())
+
+        # Dedupe by resolved path
+        for rid, rpath in roots.items():
+            if rpath == resolved:
+                return {
+                    "id": rid,
+                    "label": labels.get(rid, rid),
+                    "path": str(resolved),
+                }
+
+        label = (
+            body.label.strip()
+            if body.label and body.label.strip()
+            else resolved.name or str(resolved)
+        )
+        base_id = re.sub(r"[^a-zA-Z0-9_-]", "_", label.lower()).strip("_") or "root"
+        root_id = base_id
+        counter = 1
+        while root_id in roots:
+            counter += 1
+            root_id = f"{base_id}_{counter}"
+
+        roots[root_id] = resolved
+        labels[root_id] = label
+
+        roots_file = getattr(request.app.state, "workspace_roots_file", None)
+        if roots_file:
+            _save_persisted_roots(roots, labels, builtins, roots_file)
+
+        return {
+            "id": root_id,
+            "label": label,
+            "path": str(resolved),
+        }
+
+    @app.delete("/api/workspace/roots/{root_id}")
+    async def remove_workspace_root(
+        request: Request, root_id: str
+    ) -> dict[str, Any]:
+        """Remove an added workspace root. Built-in roots cannot be deleted."""
+        _require_editor_writer(
+            request, detail="forbidden: viewers cannot modify workspace roots"
+        )
+        roots = request.app.state.workspace_roots
+        builtins = getattr(request.app.state, "builtin_workspace_roots", set())
+        labels = getattr(request.app.state, "workspace_root_labels", {})
+
+        if root_id not in roots:
+            raise HTTPException(
+                status_code=404, detail=f"unknown workspace root {root_id!r}"
+            )
+        if root_id in builtins:
+            raise HTTPException(
+                status_code=400,
+                detail=f"cannot delete built-in workspace root {root_id!r}",
+            )
+
+        del roots[root_id]
+        labels.pop(root_id, None)
+
+        roots_file = getattr(request.app.state, "workspace_roots_file", None)
+        if roots_file:
+            _save_persisted_roots(roots, labels, builtins, roots_file)
+
+        return {"deleted": True, "id": root_id}
 
     @app.get("/api/editor/status", response_model=EditorStatusResponse)
     async def get_editor_status() -> dict[str, Any]:

@@ -1530,7 +1530,7 @@ export function createStage(containerEl) {
       } else if (tool === 'terminal') {
         showView({ kind: 'terminal', title: 'Terminal' });
       } else if (tool === 'editor') {
-        showView({ kind: 'editor', title: 'Code Editor', language: 'python', filename: 'main.py', code: '# Python Sandbox\\nprint("Hello from UAP!")\\n' });
+        showView({ kind: 'editor', title: 'Code Editor', language: 'python', filename: 'main.py', code: '# Python Sandbox\nprint("Hello from UAP!")\n' });
       } else if (tool === 'note') {
         showView({ kind: 'markdown', title: 'Note', markdown: '', editable: true });
       } else if (tool === 'search') {
