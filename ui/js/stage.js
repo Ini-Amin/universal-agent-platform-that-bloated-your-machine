@@ -316,7 +316,7 @@ export function buildMarkdownBody(body, spec, emit = () => {}) {
 
   const statusEl = document.createElement('span');
   statusEl.className = 'stage-note-status';
-  statusEl.textContent = 'Markdown Note';
+  statusEl.textContent = 'Saved in this browser';
 
   toolbar.appendChild(tabsWrap);
   toolbar.appendChild(statusEl);
@@ -1401,19 +1401,20 @@ export function createStage(containerEl, options = {}) {
     return 0;
   }
 
-  function loadSplitRegion(id) {
+  function savedSplitRegion(id) {
     const raw = getStorage(`${SPLIT_KEY}.region.${id}`);
     if (raw !== null) {
       const r = Number(raw);
       if (Number.isFinite(r) && r >= 0 && r < splitMode) return r;
     }
-    const entry = views.get(String(id));
-    const kind = entry?.spec?.kind;
-    if (splitMode === 2) {
-      if (kind === 'iframe' || kind === 'whiteboard' || kind === 'note' || kind === 'handoff') return 1;
-      return 0;
-    }
-    return 0;
+    return null;
+  }
+
+  // A card with no remembered region goes to the least-loaded one (ties: lowest
+  // index), so new cards spread across the regions instead of piling up in one.
+  function loadSplitRegion(id) {
+    const saved = savedSplitRegion(id);
+    return saved === null ? leastLoadedRegion(String(id)) : saved;
   }
 
   function loadSplitPosition(id) {
@@ -1426,20 +1427,34 @@ export function createStage(containerEl, options = {}) {
     return null;
   }
 
-  function countCardsInRegion(region) {
+  function countCardsInRegion(region, exceptId) {
     let n = 0;
     for (const id of views.keys()) {
-      if (regionOf(id) === region) n += 1;
+      if (id !== exceptId && splitRegions.get(id) === region) n += 1;
     }
     return n;
   }
 
+  function leastLoadedRegion(exceptId) {
+    let best = 0;
+    for (let r = 1; r < splitMode; r += 1) {
+      if (countCardsInRegion(r, exceptId) < countCardsInRegion(best, exceptId)) best = r;
+    }
+    return best;
+  }
+
   // A card entering a region without a remembered position cascades so every
   // card in the region stays visible (no two land on the same pixel).
+  // Only cards created earlier count, so the first card sits at the origin.
   // ponytail: drop cards exactly at the pointer if a UX pass calls for it.
-  function splitCascadePos(region) {
-    const step = 28;
-    const n = countCardsInRegion(region) % 4;
+  function splitCascadePos(region, id) {
+    const step = 36; // reveals the 24px close button of the card behind
+    let n = 0;
+    for (const other of views.keys()) {
+      if (other === id) break;
+      if (splitRegions.get(other) === region) n += 1;
+    }
+    n %= 4;
     return { x: 16 + n * step, y: 16 + n * step };
   }
 
@@ -1554,18 +1569,7 @@ export function createStage(containerEl, options = {}) {
   }
 
   function defaultSplitPos(id, region) {
-    const entry = views.get(String(id));
-    const kind = entry?.spec?.kind;
-    if (splitMode === 2) {
-      if (region === 0) {
-        if (kind === 'terminal') return { x: 0, y: 406 };
-        return { x: 0, y: 0 };
-      } else if (region === 1) {
-        if (kind === 'handoff' || kind === 'note') return { x: 0, y: 607 };
-        return { x: 0, y: 0 };
-      }
-    }
-    return splitCascadePos(region);
+    return splitCascadePos(region, String(id));
   }
 
   // Place one card inside its region. `pos` wins for drops; otherwise the
@@ -1586,12 +1590,27 @@ export function createStage(containerEl, options = {}) {
     setStorage(`${SPLIT_KEY}.pos.${targetId}`, JSON.stringify(next));
     entry.cardEl.style.left = `${next.x}px`;
     entry.cardEl.style.top = `${next.y}px`;
+    // app.css sizes a split card to the room left after this offset.
+    entry.cardEl.style.setProperty('--card-x', `${next.x}px`);
+    entry.cardEl.style.setProperty('--card-y', `${next.y}px`);
     refreshRegionEmptiness();
   }
 
   function layoutSplitCards() {
-    for (const id of views.keys()) {
-      placeCardInRegion(id, loadSplitRegion(id));
+    // Remembered regions first, so the rest balance around them.
+    splitRegions.clear();
+    const ids = Array.from(views.keys());
+    for (const id of ids) {
+      const saved = savedSplitRegion(id);
+      if (saved !== null) splitRegions.set(id, saved);
+    }
+    for (const id of ids) {
+      if (!splitRegions.has(id)) {
+        splitRegions.set(id, leastLoadedRegion(id));
+        // A position remembered for another region would stack on that region's cards.
+        removeStorage(`${SPLIT_KEY}.pos.${id}`);
+      }
+      placeCardInRegion(id, splitRegions.get(id));
     }
   }
 
@@ -2523,7 +2542,7 @@ export function createStage(containerEl, options = {}) {
         img.alt = spec.alt || spec.title || '';
         img.loading = 'lazy';
         img.addEventListener('error', () => {
-          fig.innerHTML = `<div class="stage-media-error">Image failed to load: ${escapeHtml(spec.url)}</div>`;
+          fig.innerHTML = `<div class="stage-media-error" role="alert">Image failed to load: ${escapeHtml(spec.url)}<br>Check that the address is reachable and links straight to an image.</div>`;
           emit({ type: 'error', id: spec.__id, kind: 'image', message: 'image failed to load' });
         });
         fig.appendChild(img);
@@ -2549,6 +2568,7 @@ export function createStage(containerEl, options = {}) {
         if (spec.poster) video.poster = spec.poster;
         video.src = spec.url;
         video.addEventListener('error', () => {
+          fig.innerHTML = `<div class="stage-media-error" role="alert">Video failed to load: ${escapeHtml(spec.url)}<br>Check that the address is reachable and links straight to a video file.</div>`;
           emit({ type: 'error', id: spec.__id, kind: 'video', message: 'video failed to load' });
         });
         fig.appendChild(video);
@@ -3097,7 +3117,12 @@ export function createStage(containerEl, options = {}) {
     close.setAttribute('aria-label', 'Close view');
     close.title = 'Close view';
     close.textContent = '\u00D7';
-    close.addEventListener('click', () => closeView(spec.__id));
+    close.addEventListener('click', () => {
+      // A note's text lives only in its card: hand the host a copy it can offer back as Undo.
+      const text = String(spec.markdown ?? spec.text ?? '');
+      const undoable = spec.kind === 'markdown' && spec.editable && text.trim() !== '' ? { ...spec } : null;
+      if (closeView(spec.__id) && undoable) emit({ type: 'close_undoable', id: spec.__id, spec: undoable });
+    });
 
     titlebar.appendChild(kindBadge);
     if (fillBtn) titlebar.appendChild(fillBtn); // [ExcalidrawCanvas] fill mode

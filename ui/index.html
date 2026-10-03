@@ -1417,6 +1417,20 @@
     stage.onEvent((evt) => {
       if (evt.type === 'close') {
         removeUserView(evt.id);
+      } else if (evt.type === 'close_undoable') {
+        showToast({
+          kind: 'info',
+          title: 'Note closed',
+          message: `"${evt.spec.title || 'Note'}" and its text were removed from this browser.`,
+          timeoutMs: 10000,
+          actions: [{
+            label: 'Undo',
+            onClick: (t) => {
+              dismissToast(t.id);
+              persistUserView({ ...evt.spec, id: stage.showView(evt.spec) });
+            },
+          }],
+        });
       } else if (evt.type === 'clear') {
         activeUserViews = [];
         saveUserViews([]);
