@@ -26,27 +26,9 @@ TEST_DATABASE_URL = get_database_url()
 
 
 @pytest.fixture(scope="module")
-def engine() -> Iterator[Engine]:
-    """A dedicated scratch schema so parallel agents on DB never race."""
-    from sqlalchemy.engine import make_url
-
-    schema = f"user_ident_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema},public"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+def engine(isolated_engine: Engine) -> Engine:
+    """Use the module's isolated schema (migrations applied by conftest)."""
+    return isolated_engine
 
 
 @pytest.fixture()
@@ -130,7 +112,7 @@ def test_execution_service_status_projection_includes_requested_by(session_facto
     assert status_anon.get("requested_by") is None
 
 
-def test_api_tasks_user_identity_flow_and_filtering(tmp_path: Path) -> None:
+def test_api_tasks_user_identity_flow_and_filtering(tmp_path: Path, isolated_db) -> None:
     """POST /tasks sets requested_by, GET /tasks and GET /tasks/{id} expose it, and ?requested_by filters it."""
     app = create_app(runs_dir=tmp_path, run_inline=True)
     client = TestClient(app)

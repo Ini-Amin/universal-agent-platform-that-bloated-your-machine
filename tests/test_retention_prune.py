@@ -61,27 +61,9 @@ RECENT = CUTOFF + timedelta(days=1)
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture(scope="module")
-def engine() -> Iterator[Engine]:
-    """Isolated scratch schema, mirroring test_durable_runtime.py."""
-
-    from sqlalchemy.engine import make_url
-
-    schema = f"retention_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema},public"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+def engine(isolated_engine: Engine) -> Engine:
+    """The module's isolated schema (migrations applied by ``tests/conftest.py``)."""
+    return isolated_engine
 
 @pytest.fixture()
 def session_factory(engine: Engine) -> sessionmaker[Session]:

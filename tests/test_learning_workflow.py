@@ -222,22 +222,12 @@ def test_learning_graph_spec() -> None:
 
 
 @pytest.mark.asyncio
-async def test_learning_views_db_persistence_and_resolution(tmp_path) -> None:
-    from sqlalchemy import text
-    from uap.db import create_db_engine, create_session_factory
+async def test_learning_views_db_persistence_and_resolution(tmp_path, db_session_factory) -> None:
     from uap.db.engine import session_scope
     from uap.db.repositories import ExecutionRepository
     from uap.views.store import NodeViewStore
 
-    url = "postgresql+psycopg://uap:uap_local_dev@127.0.0.1:5432/uap_test"
-    try:
-        engine = create_db_engine(url, connect_args={"connect_timeout": 2})
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception as exc:
-        pytest.skip(f"PostgreSQL uap_test not reachable: {exc}")
-
-    session_factory = create_session_factory(engine)
+    session_factory = db_session_factory
     app = create_app(runs_dir=tmp_path, run_inline=True)
     # Wire session_factory into app state so execute_run uses DB persistence
     from uap.slice import PlatformSlice

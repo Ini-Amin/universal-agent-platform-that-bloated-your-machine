@@ -92,6 +92,7 @@
             <input type="text" id="task-input" aria-label="Task description" placeholder="What do you want to research?" />
             <button id="btn-proposal" class="btn" title="Preview the workflow before running it">Preview</button>
             <button id="btn-run-task" class="btn btn-accent">Run</button>
+            <button id="btn-tools-palette" class="btn btn-tools" type="button" title="Open tools palette (Whiteboard, Terminal, Editor, Video, Image, Note, Search)" aria-haspopup="dialog" aria-expanded="false">+ Tools</button>
           </div>
           <!-- Clickable examples. A first-time user does not know what this
                accepts; the supported domains are research and bug bounty only,
@@ -117,6 +118,114 @@
             <button id="btn-toggle-strip" class="btn" title="Hide the workflow strip">Strip</button>
             <button id="btn-fullscreen-stage" class="btn" title="Fullscreen the stage">Fullscreen</button>
           </div>
+        </div>
+
+        <!-- Tool Palette Popover (§Tools Directive) -->
+        <div id="tool-palette-popover" class="tool-palette-popover" style="display: none;" role="dialog" aria-modal="false" aria-label="Tool Palette">
+          <div class="tool-palette-header">
+            <div class="tool-palette-title-group">
+              <span class="tool-palette-title">Tool Launcher</span>
+              <span class="tool-palette-subtitle">Open interactive workbench tools</span>
+            </div>
+            <button id="btn-close-palette" class="tool-palette-close" type="button" aria-label="Close palette">✕</button>
+          </div>
+
+          <!-- View A: Tool Selection List -->
+          <div id="tool-palette-list" class="tool-palette-list">
+            <button type="button" class="tool-palette-item" data-tool="whiteboard">
+              <span class="tool-palette-item-icon">🎨</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Whiteboard</span>
+                <span class="tool-palette-item-desc">Excalidraw drawing canvas</span>
+              </div>
+              <span class="tool-palette-item-badge">Launch</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="terminal">
+              <span class="tool-palette-item-icon">💻</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Terminal</span>
+                <span class="tool-palette-item-desc">Interactive shell in workspace</span>
+              </div>
+              <span class="tool-palette-item-badge">Launch</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="editor">
+              <span class="tool-palette-item-icon">📝</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Code Editor</span>
+                <span class="tool-palette-item-desc">Python sandbox with execution</span>
+              </div>
+              <span class="tool-palette-item-badge">Launch</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="note">
+              <span class="tool-palette-item-icon">📄</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Note</span>
+                <span class="tool-palette-item-desc">Editable Markdown scratchpad</span>
+              </div>
+              <span class="tool-palette-item-badge">Launch</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="search">
+              <span class="tool-palette-item-icon">🔍</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Search</span>
+                <span class="tool-palette-item-desc">Web and knowledge search</span>
+              </div>
+              <span class="tool-palette-item-badge">Check</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="iframe">
+              <span class="tool-palette-item-icon">🌐</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Web Page</span>
+                <span class="tool-palette-item-desc">Embed website via iframe URL</span>
+              </div>
+              <span class="tool-palette-item-badge tool-badge-input">Needs URL</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="video">
+              <span class="tool-palette-item-icon">🎬</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Video Player</span>
+                <span class="tool-palette-item-desc">Play video from media URL</span>
+              </div>
+              <span class="tool-palette-item-badge tool-badge-input">Needs URL</span>
+            </button>
+
+            <button type="button" class="tool-palette-item" data-tool="image">
+              <span class="tool-palette-item-icon">🖼️</span>
+              <div class="tool-palette-item-info">
+                <span class="tool-palette-item-name">Image Viewer</span>
+                <span class="tool-palette-item-desc">Render image from direct URL</span>
+              </div>
+              <span class="tool-palette-item-badge tool-badge-input">Needs URL</span>
+            </button>
+          </div>
+
+          <!-- View B: Input Form for tools needing URL -->
+          <form id="tool-palette-form" class="tool-palette-form" style="display: none;">
+            <div class="tool-palette-form-header">
+              <button id="btn-tool-form-back" class="tool-palette-back" type="button">‹ Back to Tools</button>
+              <span id="tool-form-title" class="tool-form-title">Add View</span>
+            </div>
+            <div class="tool-palette-field">
+              <label for="tool-input-url" class="tool-field-label">URL <span class="required">*</span></label>
+              <input type="url" id="tool-input-url" class="tool-field-input" placeholder="https://..." required>
+              <span id="tool-url-hint" class="tool-field-hint"></span>
+            </div>
+            <div class="tool-palette-field">
+              <label for="tool-input-title" class="tool-field-label">Title <span class="optional">(optional)</span></label>
+              <input type="text" id="tool-input-title" class="tool-field-input" placeholder="Custom view title...">
+            </div>
+            <div id="tool-form-error" class="tool-form-error" style="display: none;"></div>
+            <div class="tool-palette-form-actions">
+              <button type="button" id="btn-tool-form-cancel" class="btn tool-palette-cancel">Cancel</button>
+              <button type="submit" id="btn-tool-form-submit" class="btn btn-accent tool-palette-submit">Add to Canvas</button>
+            </div>
+          </form>
         </div>
 
         <!-- Proposal Panel (§52 directive) -->
@@ -193,7 +302,7 @@
     import { canvasStore, executionStore, eventStore, uiStore } from './js/state.js';
     import { createUndoStack } from './js/undo.js';
     import { initGraphCanvas } from './js/graph-canvas.js';
-    import { createStage } from './js/stage.js';
+    import { createStage, SEARCH_STATUS_MARKDOWN } from './js/stage.js';
     import { initInspector } from './js/inspector.js';
     import { createEventStream, initEventConsole } from './js/event-stream.js';
     import {
@@ -465,6 +574,320 @@
     window.UAP.stage = stage;
     window.UAP.showView = (spec) => stage.showView(spec);
     window.UAP.setStripCollapsed = setStripCollapsed;
+
+    // --- Tool Palette & User Tools Controller (§Tools Directive) ---
+    const btnToolsPalette = document.getElementById('btn-tools-palette');
+    const palettePopover = document.getElementById('tool-palette-popover');
+    const paletteList = document.getElementById('tool-palette-list');
+    const paletteForm = document.getElementById('tool-palette-form');
+    const btnClosePalette = document.getElementById('btn-close-palette');
+    const btnToolFormBack = document.getElementById('btn-tool-form-back');
+    const btnToolFormCancel = document.getElementById('btn-tool-form-cancel');
+    const toolFormTitle = document.getElementById('tool-form-title');
+    const toolInputUrl = document.getElementById('tool-input-url');
+    const toolInputTitle = document.getElementById('tool-input-title');
+    const toolUrlHint = document.getElementById('tool-url-hint');
+    const toolFormError = document.getElementById('tool-form-error');
+
+    let activeInputTool = null;
+
+    const TOOL_CONFIGS = {
+      whiteboard: {
+        kind: 'whiteboard',
+        title: 'Whiteboard',
+        needsInput: false,
+      },
+      terminal: {
+        kind: 'terminal',
+        title: 'Terminal',
+        needsInput: false,
+      },
+      editor: {
+        kind: 'editor',
+        title: 'Code Editor',
+        language: 'python',
+        filename: 'main.py',
+        code: '# Python Sandbox\\nprint("Hello from UAP!")\\n',
+        needsInput: false,
+      },
+      note: {
+        kind: 'markdown',
+        title: 'Note',
+        markdown: '',
+        editable: true,
+        needsInput: false,
+      },
+      search: {
+        kind: 'markdown',
+        id: 'tool-search',
+        title: 'Search (Not Configured)',
+        markdown: SEARCH_STATUS_MARKDOWN,
+        needsInput: false,
+      },
+      iframe: {
+        kind: 'iframe',
+        defaultTitle: 'Web Page',
+        needsInput: true,
+        formTitle: 'Add Embedded Web Page',
+        urlPlaceholder: 'https://example.com',
+        hint: 'Enter a valid web page URL to embed via iframe.',
+      },
+      video: {
+        kind: 'video',
+        defaultTitle: 'Video',
+        needsInput: true,
+        formTitle: 'Add Video Player',
+        urlPlaceholder: 'https://example.com/video.mp4',
+        hint: 'Enter a direct URL to a video file (.mp4, .webm) or video stream.',
+      },
+      image: {
+        kind: 'image',
+        defaultTitle: 'Image',
+        needsInput: true,
+        formTitle: 'Add Image Viewer',
+        urlPlaceholder: 'https://example.com/image.png',
+        hint: 'Enter a direct URL to an image (.png, .jpg, .svg, .webp).',
+      },
+    };
+
+    function showListView() {
+      if (paletteList) paletteList.style.display = 'flex';
+      if (paletteForm) paletteForm.style.display = 'none';
+      activeInputTool = null;
+      hideFormError();
+    }
+
+    function showFormView(toolKey) {
+      activeInputTool = toolKey;
+      const cfg = TOOL_CONFIGS[toolKey] || {};
+      if (toolFormTitle) toolFormTitle.textContent = cfg.formTitle || 'Add View';
+      if (toolInputUrl) {
+        toolInputUrl.value = '';
+        toolInputUrl.placeholder = cfg.urlPlaceholder || 'https://...';
+      }
+      if (toolInputTitle) {
+        toolInputTitle.value = '';
+        toolInputTitle.placeholder = `e.g. My ${cfg.defaultTitle || 'View'}`;
+      }
+      if (toolUrlHint) toolUrlHint.textContent = cfg.hint || '';
+      hideFormError();
+      if (paletteList) paletteList.style.display = 'none';
+      if (paletteForm) paletteForm.style.display = 'flex';
+      setTimeout(() => toolInputUrl?.focus(), 50);
+    }
+
+    function showFormError(msg) {
+      if (toolFormError) {
+        toolFormError.textContent = msg;
+        toolFormError.style.display = 'block';
+      }
+    }
+
+    function hideFormError() {
+      if (toolFormError) {
+        toolFormError.textContent = '';
+        toolFormError.style.display = 'none';
+      }
+    }
+
+    function positionPalette() {
+      if (!palettePopover || !btnToolsPalette) return;
+      const rect = btnToolsPalette.getBoundingClientRect();
+      const canvasRect = document.getElementById('canvas')?.getBoundingClientRect() || { top: 0, left: 0 };
+      const top = (rect.bottom - canvasRect.top) + 6;
+      const left = Math.max(10, Math.min((rect.left - canvasRect.left), window.innerWidth - 400));
+      palettePopover.style.top = `${top}px`;
+      palettePopover.style.left = `${left}px`;
+    }
+
+    function openPalette(toolToPrompt = null) {
+      if (!palettePopover) return;
+      positionPalette();
+      palettePopover.style.display = 'flex';
+      btnToolsPalette?.setAttribute('aria-expanded', 'true');
+      btnToolsPalette?.classList.add('active');
+      if (toolToPrompt && TOOL_CONFIGS[toolToPrompt]?.needsInput) {
+        showFormView(toolToPrompt);
+      } else {
+        showListView();
+      }
+    }
+
+    function closePalette() {
+      if (!palettePopover) return;
+      palettePopover.style.display = 'none';
+      btnToolsPalette?.setAttribute('aria-expanded', 'false');
+      btnToolsPalette?.classList.remove('active');
+      activeInputTool = null;
+      hideFormError();
+    }
+
+    function togglePalette() {
+      if (palettePopover?.style.display === 'none' || !palettePopover?.style.display) {
+        openPalette();
+      } else {
+        closePalette();
+      }
+    }
+
+    let userViewSeq = 0;
+
+    function launchTool(toolKey, extraProps = {}) {
+      const cfg = TOOL_CONFIGS[toolKey];
+      if (!cfg) return;
+      const spec = { ...cfg, ...extraProps };
+      delete spec.needsInput;
+      delete spec.formTitle;
+      delete spec.urlPlaceholder;
+      delete spec.hint;
+      delete spec.defaultTitle;
+      // Every user-opened view gets a stable, unique id so it persists and
+      // reloads as the SAME card (id also makes the stage replace-not-duplicate).
+      if (!spec.id) {
+        userViewSeq += 1;
+        spec.id = `tool-${toolKey}-${Date.now().toString(36)}-${userViewSeq}`;
+      }
+      const id = stage.showView(spec);
+      spec.id = id; // normalize() may have generated the id; keep them in sync
+      persistUserView(spec);
+      return id;
+    }
+
+    // User views persistence in localStorage
+    const USER_VIEWS_KEY = 'uap.stage.user_views';
+    function loadSavedUserViews() {
+      try {
+        const raw = localStorage.getItem(USER_VIEWS_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+      } catch (_e) {
+        return [];
+      }
+    }
+
+    function saveUserViews(specs) {
+      try {
+        localStorage.setItem(USER_VIEWS_KEY, JSON.stringify(specs));
+      } catch (_e) {}
+    }
+
+    let activeUserViews = loadSavedUserViews();
+
+    function specKey(spec) {
+      return spec && (spec.id || spec.__id);
+    }
+
+    function persistUserView(spec) {
+      const key = specKey(spec);
+      if (!key) return;
+      // Strip the internal __id; `id` is the durable identity.
+      const copy = { ...spec, id: key };
+      delete copy.__id;
+      activeUserViews = activeUserViews.filter((v) => specKey(v) !== key);
+      activeUserViews.push(copy);
+      saveUserViews(activeUserViews);
+    }
+
+    function removeUserView(id) {
+      const key = String(id);
+      activeUserViews = activeUserViews.filter((v) => specKey(v) !== key);
+      saveUserViews(activeUserViews);
+    }
+
+    // Restore saved user views on startup
+    if (activeUserViews.length > 0) {
+      for (const spec of activeUserViews) {
+        try {
+          stage.showView(spec);
+        } catch (e) {
+          console.warn('Failed to restore user view:', spec, e);
+        }
+      }
+    }
+
+    // Wire stage events for persistence and tool input requests
+    stage.onEvent((evt) => {
+      if (evt.type === 'close') {
+        removeUserView(evt.id);
+      } else if (evt.type === 'clear') {
+        activeUserViews = [];
+        saveUserViews([]);
+      } else if (evt.type === 'note_change') {
+        const found = activeUserViews.find((v) => specKey(v) === String(evt.id));
+        if (found) {
+          found.markdown = evt.text;
+          found.text = evt.text;
+          saveUserViews(activeUserViews);
+        }
+      } else if (evt.type === 'request_tool_input') {
+        openPalette(evt.tool);
+      }
+    });
+
+    btnToolsPalette?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePalette();
+    });
+
+    btnClosePalette?.addEventListener('click', closePalette);
+    btnToolFormCancel?.addEventListener('click', closePalette);
+    btnToolFormBack?.addEventListener('click', showListView);
+
+    paletteList?.querySelectorAll('.tool-palette-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        const tool = item.getAttribute('data-tool');
+        const cfg = TOOL_CONFIGS[tool];
+        if (!cfg) return;
+        if (cfg.needsInput) {
+          showFormView(tool);
+        } else {
+          launchTool(tool);
+          closePalette();
+        }
+      });
+    });
+
+    paletteForm?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!activeInputTool) return;
+      const url = (toolInputUrl?.value || '').trim();
+      if (!url) {
+        showFormError('URL is required.');
+        toolInputUrl?.focus();
+        return;
+      }
+      let finalUrl = url;
+      if (!/^https?:\/\/|^\/|^data:/i.test(finalUrl)) {
+        finalUrl = 'https://' + finalUrl;
+      }
+      const customTitle = (toolInputTitle?.value || '').trim();
+      const cfg = TOOL_CONFIGS[activeInputTool];
+      launchTool(activeInputTool, {
+        url: finalUrl,
+        title: customTitle || cfg.defaultTitle,
+      });
+      closePalette();
+    });
+
+    // Close palette on click outside or escape key
+    document.addEventListener('click', (e) => {
+      if (palettePopover?.style.display === 'flex' || palettePopover?.style.display === 'block') {
+        if (!palettePopover.contains(e.target) && e.target !== btnToolsPalette && !btnToolsPalette?.contains(e.target)) {
+          closePalette();
+        }
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && (palettePopover?.style.display === 'flex' || palettePopover?.style.display === 'block')) {
+        closePalette();
+      }
+    });
+
+    window.UAP.openToolPalette = openPalette;
+    window.UAP.closeToolPalette = closePalette;
+
 
     // Initialize Inspector (§53)
     const inspectorContainer = document.getElementById('inspector-content');

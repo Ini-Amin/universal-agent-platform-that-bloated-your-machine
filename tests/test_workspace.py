@@ -108,7 +108,7 @@ requires_db = pytest.mark.skipif(
 
 
 @pytest.fixture()
-def db_session():
+def db_session(isolated_db):
     """A real SQLAlchemy session against ``uap_test`` with a workspaces table."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker

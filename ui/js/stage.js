@@ -27,6 +27,22 @@ const KIND_TITLES = {
 // X-Frame-Options / CSP frame-ancestors, so it renders inside an <iframe>.
 export const EXCALIDRAW_URL = 'https://excalidraw.com/';
 
+export const SEARCH_STATUS_MARKDOWN = `# 🔍 Knowledge & Web Search
+
+> **Search Provider Not Configured**
+> No search API endpoint or MCP search server is currently available on the server.
+
+### What Was Checked
+- **Backend API Routes**: The server provides \`/tasks\`, \`/events\`, \`/api/executions\`, \`/api/sandbox/run\`, but no \`/api/search\` route exists in the API specification.
+- **Registered Tools (\`GET /api/resources/tools\`)**: 14 tools registered (local file tools and 11 \`bugbounty-mcp\` security tools). No search provider (e.g., \`exa.search\`, \`brave.search\`, or \`tavily.search\`) is registered.
+- **Research Workflow (\`src/uap/workflows/research.py\`)**: The research workflow attempts to resolve:
+  1. An MCP tool matching \`*.search\` or containing \`search\`
+  2. An HTTP search client (Brave/Exa API key)
+  3. Falls back to deterministic simulation stubs (\`stub:web\`)
+
+### How to Enable User-Driven Search
+To allow users to search directly from the canvas, a backend route (e.g. \`POST /api/search\` or \`GET /api/search?q=...\`) or an MCP search server must be configured.`;
+
 const DEFAULT_IFRAME_SANDBOX =
   'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals';
 
@@ -249,6 +265,103 @@ export function ansiToHtml(str) {
   if (openSpan) html += '</span>';
 
   return html;
+}
+
+// Module-level counterpart to the stage's `missing()` helper: buildMarkdownBody
+// lives outside createStage, so it cannot reach that closure.
+function missingMarkdown(body) {
+  const box = document.createElement('div');
+  box.className = 'stage-placeholder stage-placeholder-error';
+  box.innerHTML = `
+    <div class="stage-placeholder-icon">!</div>
+    <div class="stage-placeholder-title">${escapeHtml(KIND_TITLES.markdown || 'Markdown')} view has no content</div>
+    <div class="stage-placeholder-message">A "${escapeHtml('markdown')}" view needs ${escapeHtml('`markdown` (string)')}.</div>
+  `;
+  body.appendChild(box);
+  return body;
+}
+
+export function buildMarkdownBody(body, spec, emit = () => {}) {
+  const initialText = spec.markdown !== undefined ? spec.markdown : (spec.text !== undefined ? spec.text : (spec.editable ? '' : undefined));
+  if (!spec.editable) {
+    if (typeof initialText !== 'string') return missingMarkdown(body);
+    body.classList.add('stage-markdown');
+    body.innerHTML = renderMarkdown(initialText);
+    return body;
+  }
+
+  body.classList.add('stage-note-body');
+  const container = document.createElement('div');
+  container.className = 'stage-note-container';
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'stage-note-toolbar';
+
+  const tabsWrap = document.createElement('div');
+  tabsWrap.className = 'stage-note-tabs';
+
+  const editTab = document.createElement('button');
+  editTab.type = 'button';
+  editTab.className = 'stage-note-tab active';
+  editTab.textContent = '✏️ Edit';
+
+  const previewTab = document.createElement('button');
+  previewTab.type = 'button';
+  previewTab.className = 'stage-note-tab';
+  previewTab.textContent = '👁️ Preview';
+
+  tabsWrap.appendChild(editTab);
+  tabsWrap.appendChild(previewTab);
+
+  const statusEl = document.createElement('span');
+  statusEl.className = 'stage-note-status';
+  statusEl.textContent = 'Markdown Note';
+
+  toolbar.appendChild(tabsWrap);
+  toolbar.appendChild(statusEl);
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'stage-note-textarea';
+  textarea.placeholder = 'Type your note in Markdown here... (e.g. # Title, - lists, code)';
+  textarea.value = typeof initialText === 'string' ? initialText : '';
+  textarea.spellcheck = true;
+  textarea.setAttribute('aria-label', spec.title || 'Markdown Note');
+
+  const preview = document.createElement('div');
+  preview.className = 'stage-note-preview stage-markdown';
+  preview.style.display = 'none';
+
+  function updatePreview() {
+    preview.innerHTML = renderMarkdown(textarea.value || '*Empty note*');
+  }
+
+  editTab.addEventListener('click', () => {
+    preview.style.display = 'none';
+    textarea.style.display = 'block';
+    previewTab.classList.remove('active');
+    editTab.classList.add('active');
+    textarea.focus();
+  });
+
+  previewTab.addEventListener('click', () => {
+    updatePreview();
+    textarea.style.display = 'none';
+    preview.style.display = 'block';
+    editTab.classList.remove('active');
+    previewTab.classList.add('active');
+  });
+
+  textarea.addEventListener('input', () => {
+    spec.markdown = textarea.value;
+    spec.text = textarea.value;
+    emit({ type: 'note_change', id: spec.__id, kind: 'markdown', text: textarea.value });
+  });
+
+  container.appendChild(toolbar);
+  container.appendChild(textarea);
+  container.appendChild(preview);
+  body.appendChild(container);
+  return body;
 }
 
 export function buildTerminalBody(body, spec, emit = () => {}) {
@@ -666,8 +779,13 @@ export function buildEditorBody(body, spec, emit = () => {}) {
     outputContent.textContent = 'Executing code against backend...\n';
 
     const code = textarea.value || '';
-    const endpoint = spec.runEndpoint || '/tasks';
-    const payload = spec.runEndpoint ? { code } : { input: code };
+    // The backend sandbox route (POST /api/sandbox/run) is the real execution
+    // path for a user-opened editor: it runs the code in an isolated process and
+    // returns stdout/stderr/exit_code. A caller may still override with
+    // `runEndpoint` (e.g. an agent that wants the code submitted as a task).
+    const endpoint = spec.runEndpoint || '/api/sandbox/run';
+    const language = spec.language || 'python';
+    const payload = spec.runEndpoint ? { code } : { language, code };
 
     const startTime = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     try {
@@ -903,6 +1021,111 @@ export function createStage(containerEl) {
     <button type="button" class="stage-zoom-btn stage-zoom-fit" data-action="zoom-fit" title="Fit all cards in view" aria-label="Fit to view">Fit</button>
   `;
   containerEl.appendChild(zoomControls);
+
+  // [ToolWorkbench] Empty stage discoverability guide
+  const emptyStateEl = document.createElement('div');
+  emptyStateEl.className = 'stage-empty-state';
+  emptyStateEl.setAttribute('role', 'region');
+  emptyStateEl.setAttribute('aria-label', 'Workbench guide');
+  emptyStateEl.innerHTML = `
+    <div class="stage-empty-content">
+      <div class="stage-empty-badge">✦ WORKBENCH CANVAS</div>
+      <h2 class="stage-empty-title">Your interactive workspace is ready</h2>
+      <p class="stage-empty-desc">
+        Run a task above to have agents work here, or launch tools directly onto the canvas to draw, code, explore, and take notes.
+      </p>
+      <div class="stage-empty-actions">
+        <button type="button" class="stage-empty-tool-btn" data-tool="whiteboard">
+          <span class="stage-empty-icon">🎨</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Whiteboard</span>
+            <span class="stage-empty-sub">Excalidraw</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="terminal">
+          <span class="stage-empty-icon">💻</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Terminal</span>
+            <span class="stage-empty-sub">Shell session</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="editor">
+          <span class="stage-empty-icon">📝</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Code Editor</span>
+            <span class="stage-empty-sub">Python sandbox</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="note">
+          <span class="stage-empty-icon">📄</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Note</span>
+            <span class="stage-empty-sub">Markdown</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="search">
+          <span class="stage-empty-icon">🔍</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Search</span>
+            <span class="stage-empty-sub">Web & knowledge</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="iframe">
+          <span class="stage-empty-icon">🌐</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Web Page</span>
+            <span class="stage-empty-sub">Embed URL</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="video">
+          <span class="stage-empty-icon">🎬</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Video</span>
+            <span class="stage-empty-sub">Media player</span>
+          </span>
+        </button>
+        <button type="button" class="stage-empty-tool-btn" data-tool="image">
+          <span class="stage-empty-icon">🖼️</span>
+          <span class="stage-empty-info">
+            <span class="stage-empty-name">Image</span>
+            <span class="stage-empty-sub">Image viewer</span>
+          </span>
+        </button>
+      </div>
+      <div class="stage-empty-footer">
+        <span class="stage-empty-hint">Tip: Click <strong>+ Tools</strong> in the toolbar above anytime to add views.</span>
+      </div>
+    </div>
+  `;
+  containerEl.appendChild(emptyStateEl);
+
+  function updateEmptyState() {
+    if (emptyStateEl) {
+      emptyStateEl.style.display = views.size === 0 ? 'flex' : 'none';
+    }
+  }
+
+  emptyStateEl.querySelectorAll('.stage-empty-tool-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const tool = btn.getAttribute('data-tool');
+      emit({ type: 'empty_tool_click', tool });
+      if (tool === 'whiteboard') {
+        showView({ kind: 'whiteboard', title: 'Whiteboard' });
+      } else if (tool === 'terminal') {
+        showView({ kind: 'terminal', title: 'Terminal' });
+      } else if (tool === 'editor') {
+        showView({ kind: 'editor', title: 'Code Editor', language: 'python', filename: 'main.py', code: '# Python Sandbox\\nprint("Hello from UAP!")\\n' });
+      } else if (tool === 'note') {
+        showView({ kind: 'markdown', title: 'Note', markdown: '', editable: true });
+      } else if (tool === 'search') {
+        showView({ kind: 'markdown', id: 'tool-search', title: 'Search (Not Configured)', markdown: SEARCH_STATUS_MARKDOWN });
+      } else {
+        emit({ type: 'request_tool_input', tool });
+      }
+    });
+  });
+
 
   function updateZoomDisplay() {
     const pct = `${Math.round(viewport.zoom * 100)}%`;
@@ -1220,11 +1443,7 @@ export function createStage(containerEl) {
       }
 
       case 'markdown': {
-        const text = spec.markdown !== undefined ? spec.markdown : spec.text;
-        if (typeof text !== 'string') return missing(body, 'markdown', '`markdown` (string)');
-        body.classList.add('stage-markdown');
-        body.innerHTML = renderMarkdown(text);
-        return body;
+        return buildMarkdownBody(body, spec, emit);
       }
 
       case 'image': {
@@ -1539,8 +1758,10 @@ export function createStage(containerEl) {
     const viewUrl = getViewUrl(spec);
 
     // 1. Copy button (for text content or URL)
+    // An editable note starts empty, so `textContent` is '' at build time; the
+    // button must still appear and copy whatever the user has typed since.
     const copyTarget = typeof textContent === 'string' ? textContent : viewUrl;
-    if (typeof copyTarget === 'string' && copyTarget.length > 0) {
+    if (typeof copyTarget === 'string' && (copyTarget.length > 0 || spec.editable)) {
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
       copyBtn.className = 'stage-card-action-btn stage-card-btn-copy';
@@ -1548,7 +1769,9 @@ export function createStage(containerEl) {
       copyBtn.setAttribute('aria-label', 'Copy to clipboard');
       copyBtn.textContent = 'Copy';
       copyBtn.addEventListener('click', async () => {
-        const ok = await copyText(copyTarget);
+        const live = getViewTextContent(spec);
+        const target = typeof live === 'string' ? live : (viewUrl || copyTarget);
+        const ok = await copyText(target);
         copyBtn.textContent = ok ? 'Copied' : 'Failed';
         emit({ type: ok ? 'copy' : 'error', id: spec.__id, kind: spec.kind, message: ok ? 'copied' : 'copy failed' });
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
@@ -1593,7 +1816,11 @@ export function createStage(containerEl) {
           const mime = spec.kind === 'html' ? 'text/html;charset=utf-8'
             : spec.kind === 'markdown' ? 'text/markdown;charset=utf-8'
             : 'text/plain;charset=utf-8';
-          downloadBlob(filename, textContent, mime);
+          // Read the CURRENT content, not the snapshot from build time: an
+          // editable note mutates spec.markdown/spec.text as the user types.
+          const live = getViewTextContent(spec);
+          const body = typeof live === 'string' ? live : textContent;
+          downloadBlob(filename, body, mime);
           emit({ type: 'download', id: spec.__id, kind: spec.kind, filename });
         });
         actions.appendChild(dlBtn);
@@ -1731,6 +1958,7 @@ export function createStage(containerEl) {
     if (s.fill === true) {
       fillView(s.__id);
     }
+    updateEmptyState();
     return s.__id;
   }
 
@@ -1747,6 +1975,7 @@ export function createStage(containerEl) {
     positions.delete(targetId);
     removeStorage(`uap.stage.pos.${targetId}`);
     emit({ type: 'close', id: targetId });
+    updateEmptyState();
     return true;
   }
 
@@ -1772,6 +2001,7 @@ export function createStage(containerEl) {
     }
     views.clear();
     emit({ type: 'clear', ids });
+    updateEmptyState();
     return ids.length;
   }
 
@@ -1845,12 +2075,15 @@ export function createStage(containerEl) {
     getCardPosition,
     setCardPosition,
     destroy,
+    updateEmptyState,
+    getEmptyStateElement: () => emptyStateEl,
   };
   containerEl.__stage = api;
   if (typeof window !== 'undefined') {
     window.stage = api;
     window.stageApi = api;
   }
+  updateEmptyState();
   return api;
 }
 

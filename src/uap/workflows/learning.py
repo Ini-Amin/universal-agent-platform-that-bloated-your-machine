@@ -71,6 +71,119 @@ HONESTY_BANNER = (
     "> collectors before treating any claim as verified."
 )
 
+# --------------------------------------------------------------------------- #
+# ASD-STE100 Style Prompts (Lesson & Summary)
+# --------------------------------------------------------------------------- #
+
+# Andrej Karpathy's writing advice (October 2026):
+# "Ask your LLM to explain something in ASD-STE100, it's a controlled language
+# specification originally developed for aerospace maintenance documentation.
+# LLMs well-versed in this language and it comes with heavy constraints on clean
+# writing style that I often find a lot more readable. Sometimes I've tried to
+# soften it a bit e.g. ask for '80% of the way to ASD-STE100' because the spec
+# is quite stringent."
+#
+# Why ~80% instead of 100%: full compliance is too stringent for teaching prose
+# (it restricts vocabulary to an approved dictionary of ~1,000 words and forbids
+# helpful analogies), but ~80% delivers the key clarity benefits: short sentences,
+# active voice, one idea per sentence, consistent terminology, and no ambiguous pronouns.
+ASD_STE100_STYLE_INSTRUCTION = (
+    "Style: Write approximately 80% of the way to ASD-STE100 (aerospace "
+    "controlled language specification). Follow these rules:\n"
+    "- Express only one idea per sentence.\n"
+    "- Keep sentences short and prefer the active voice.\n"
+    "- Use one term for one thing consistently; do not vary vocabulary for style.\n"
+    "- Avoid ambiguous pronouns ('it', 'this', 'that') when the referent could be unclear.\n"
+    "- Use simple, common words; avoid idioms and metaphors.\n"
+    "- Give instructions as direct commands."
+)
+ASD_STE100_INSTRUCTION = ASD_STE100_STYLE_INSTRUCTION
+
+LESSON_PROMPT_TEMPLATE = (
+    "You are an expert technical instructor teaching {topic} to a {level} learner.\n"
+    "Step: {step_title}\n"
+    "Objective: {step_goal}\n"
+    "Finish line: {finish_line}\n\n"
+    "Write the lesson explanation for this step.\n"
+    "Explain the core mental model and guide the learner to complete the exercise.\n\n"
+    "{style_instruction}\n\n"
+    "{honesty_instruction}"
+)
+
+SUMMARY_PROMPT_TEMPLATE = (
+    "You are an expert technical instructor teaching {topic}.\n"
+    "Step: {step_title}\n"
+    "Objective: {step_goal}\n\n"
+    "Write a concise summary of the key takeaways and mental model for this step.\n\n"
+    "{style_instruction}\n\n"
+    "{honesty_instruction}"
+)
+
+
+def compose_lesson_prompt(
+    topic: str,
+    step: dict[str, Any] | None = None,
+    current_level: str = "beginner",
+    target_level: str = "intermediate",
+    simulated: bool = False,
+    evidence: list[Evidence] | None = None,
+) -> str:
+    """Compose the prompt used to generate a lesson explanation.
+
+    Carries the ASD-STE100 ~80% style instruction and preserves the simulation
+    honesty requirement when stub collectors are active.
+    """
+    step = step or {}
+    honesty_instruction = (
+        f"Honesty requirement:\n{HONESTY_BANNER}\n"
+        "State clearly that findings use deterministic sample data."
+        if simulated
+        else "Honesty requirement: Rely strictly on verified source evidence. Do not fabricate citations or URLs."
+    )
+    return LESSON_PROMPT_TEMPLATE.format(
+        topic=topic,
+        level=f"{current_level} to {target_level}",
+        step_title=step.get("title", f"Foundational {topic}"),
+        step_goal=step.get("goal", f"Master core concepts of {topic}"),
+        finish_line=step.get("finish_line", "Complete verification test."),
+        style_instruction=ASD_STE100_STYLE_INSTRUCTION,
+        honesty_instruction=honesty_instruction,
+    )
+
+
+def compose_summary_prompt(
+    topic: str,
+    step: dict[str, Any] | None = None,
+    current_level: str = "beginner",
+    target_level: str = "intermediate",
+    simulated: bool = False,
+    evidence: list[Evidence] | None = None,
+) -> str:
+    """Compose the prompt used to generate a step summary.
+
+    Carries the ASD-STE100 ~80% style instruction and preserves the simulation
+    honesty requirement when stub collectors are active.
+    """
+    step = step or {}
+    honesty_instruction = (
+        f"Honesty requirement:\n{HONESTY_BANNER}\n"
+        "State clearly that findings use deterministic sample data."
+        if simulated
+        else "Honesty requirement: Rely strictly on verified source evidence. Do not fabricate citations or URLs."
+    )
+    return SUMMARY_PROMPT_TEMPLATE.format(
+        topic=topic,
+        step_title=step.get("title", f"Foundational {topic}"),
+        step_goal=step.get("goal", f"Master core concepts of {topic}"),
+        style_instruction=ASD_STE100_STYLE_INSTRUCTION,
+        honesty_instruction=honesty_instruction,
+    )
+
+
+build_lesson_prompt = compose_lesson_prompt
+build_summary_prompt = compose_summary_prompt
+
+
 
 # --------------------------------------------------------------------------- #
 # Goal Analysis Helpers
@@ -612,19 +725,55 @@ class LearningWorkflow:
     async def _lesson(self, state: WorkflowState) -> NodeResult:
         current_step = state.data.get("current_step", {})
         curriculum = state.data.get("curriculum", [])
+        topic = state.data.get("topic", "backend development")
+        current_level = state.data.get("current_level", "beginner")
+        target_level = state.data.get("target_level", "intermediate")
+        simulated = state.data.get("simulated", self.simulated)
+        evidence = state.data.get("evidence", [])
+
+        # Compose prompts carrying the ASD-STE100 style instruction
+        lesson_prompt = compose_lesson_prompt(
+            topic=topic,
+            step=current_step,
+            current_level=current_level,
+            target_level=target_level,
+            simulated=simulated,
+            evidence=evidence,
+        )
+        summary_prompt = compose_summary_prompt(
+            topic=topic,
+            step=current_step,
+            current_level=current_level,
+            target_level=target_level,
+            simulated=simulated,
+            evidence=evidence,
+        )
+
         title = f"Lesson: {current_step.get('title', 'Explanation')}"
         explanation = current_step.get("explanation", "")
+        summary = current_step.get("summary", "")
+
+        # If a real synthesizer is attached, generate explanation via LLM
+        if self.synthesizer is not None:
+            try:
+                synth_out = await self.synthesizer(lesson_prompt, evidence)
+                if synth_out:
+                    explanation = synth_out
+            except Exception as exc:
+                log.warning("Lesson synthesis failed: %s", exc)
 
         view = NodeView(
             kind="markdown",
             title=title,
-            text=f"{explanation}\n\n{current_step.get('summary', '')}".strip(),
+            text=f"{explanation}\n\n{summary}".strip(),
             caption=f"Step 1 of {len(curriculum)}: {current_step.get('title', '')}",
         )
 
         return NodeResult(
             {
                 "lesson_view": view.model_dump(mode="json"),
+                "lesson_prompt": lesson_prompt,
+                "summary_prompt": summary_prompt,
             },
             next_node="sources",
         )

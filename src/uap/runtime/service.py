@@ -506,6 +506,13 @@ class ExecutionService:
         new execution row with ``resume_count=0`` and a ``forked_from`` /
         ``from_seq`` marker, then records ``EXECUTION_FORKED`` on the source and
         ``EXECUTION_STARTED`` on the child. The source execution is untouched.
+
+        The child gets a FRESH correlation id. Reusing the source's would make
+        the two runs indistinguishable to every correlation-keyed read (the
+        newest row wins), would collide their artifact directories, and would
+        make "delete the fork" ambiguous. Fork lineage is already recorded
+        durably in the child's ``forked_from`` metadata and the source's
+        ``EXECUTION_FORKED`` event, so nothing is lost by separating the ids.
         """
 
         with self._scope() as session:
@@ -527,7 +534,7 @@ class ExecutionService:
             child = ExecutionRepository(session).create(
                 source.workflow_version_id,
                 input=self._user_inputs(source),
-                correlation_id=source.correlation_id,
+                correlation_id=uuid.uuid4(),
                 status=STATUS_QUEUED,
                 requested_by=source.requested_by,
             )
@@ -582,15 +589,115 @@ class ExecutionService:
         to the in-memory sink — which holds only the 2 coarse lifecycle events,
         so the Events panel showed 2 rows while PostgreSQL held 23.
         """
-        eid = uuid.UUID(str(execution_id))
+        try:
+            eid = uuid.UUID(str(execution_id))
+        except (ValueError, AttributeError, TypeError):
+            # A malformed client id must resolve to "not found", never raise:
+            # the delete/rerun/fork routes are reachable with arbitrary path
+            # segments and a 500 on a typo is a bug, not a security win.
+            return None
         repo = ExecutionRepository(session)
         row = repo.get(eid) or repo.get_by_correlation_id(eid)
         return row.id if row is not None else None
 
+    def source_for_reuse(self, execution_id: str) -> dict[str, Any]:
+        """Return what a rerun/fork needs to reuse ``execution_id``'s work.
+
+        Resolves EITHER the durable row id OR the client-facing correlation id
+        (the id ``POST /tasks`` hands the UI). Returns the source's workflow
+        reference, workspace, requester, status, its verbatim user input, and
+        the row/correlation ids so a caller can both reuse the run and (for a
+        delete) enforce the owner rule. Raises :class:`LookupError` when the
+        execution is unknown.
+        """
+
+        with self._scope() as session:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
+                raise LookupError(f"execution {execution_id} not found")
+            row = ExecutionRepository(session).get(eid)
+            meta = self._runtime_meta(row)
+            user_inputs = self._user_inputs(row)
+            # The slice stores the raw request under "value"; legacy runs store
+            # the raw string directly. Prefer "value", then the sole input.
+            raw = user_inputs.get("value")
+            if raw is None:
+                raw = next(iter(user_inputs.values()), "") if len(user_inputs) == 1 else ""
+            return {
+                "execution_id": str(eid),
+                "correlation_id": (
+                    str(row.correlation_id) if row.correlation_id is not None else None
+                ),
+                "workflow_ref": meta.get("workflow_ref"),
+                "workspace_id": meta.get("workspace_id"),
+                "requested_by": row.requested_by,
+                "status": row.status.value,
+                "input": str(raw) if raw is not None else "",
+            }
+
+    def delete_execution(self, execution_id: str) -> dict[str, Any]:
+        """Delete ONE finished execution; return its ids and cascade counts.
+
+        Refuses a live run by raising :class:`ValueError` (deleting a running
+        execution out from under its worker is a data-integrity bug); raises
+        :class:`LookupError` when the execution does not exist. The return
+        value carries ``execution_id`` / ``correlation_id`` / ``requested_by``
+        (so the HTTP layer can enforce the owner rule) and ``deleted`` with the
+        row + child counts. Artifact files are NOT in the DB and are removed by
+        the caller, which owns the runs root.
+        """
+
+        with self._scope() as session:
+            repo = ExecutionRepository(session)
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
+                raise LookupError(f"execution {execution_id} not found")
+            row = repo.get(eid)
+            result = {
+                "execution_id": str(eid),
+                "correlation_id": (
+                    str(row.correlation_id) if row.correlation_id is not None else None
+                ),
+                "requested_by": row.requested_by,
+                "status": row.status.value,
+            }
+            result["deleted"] = repo.delete(eid)
+            return result
+
+    def fork_execution(
+        self,
+        execution_id: str,
+        *,
+        from_seq: int | None = None,
+        label: str = "fork",
+    ) -> dict[str, Any]:
+        """Fork ``execution_id`` and return the new execution + correlation ids.
+
+        Thin wrapper over :meth:`fork` that also reports the child's
+        correlation id (the id the UI needs to follow the new run) and its
+        durable status, so the HTTP layer can hand back a runnable handle.
+        """
+
+        child_id = self.fork(execution_id, from_seq=from_seq, label=label)
+        with self._scope() as session:
+            child = ExecutionRepository(session).get(uuid.UUID(child_id))
+            return {
+                "execution_id": child_id,
+                "correlation_id": (
+                    str(child.correlation_id)
+                    if child is not None and child.correlation_id is not None
+                    else None
+                ),
+                "status": child.status.value if child is not None else "pending",
+            }
+
     def status(self, execution_id: str) -> dict[str, Any]:
         """Return the durable status projection for ``execution_id``."""
 
-        eid = uuid.UUID(str(execution_id))
+        try:
+            eid = uuid.UUID(str(execution_id))
+        except (ValueError, AttributeError, TypeError):
+            raise LookupError(f"execution {execution_id} not found")
         with self._scope() as session:
             row = ExecutionRepository(session).get(eid) or (
                 ExecutionRepository(session).get_by_correlation_id(eid)
@@ -629,7 +736,6 @@ class ExecutionService:
         ``events_since(id, 5)`` to resync with no gaps and no duplicates.
         """
 
-        eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
             resolved = self._resolve_execution_id(session, execution_id)
             if resolved is None:

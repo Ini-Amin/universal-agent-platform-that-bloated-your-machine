@@ -118,33 +118,14 @@ pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture(scope="module")
-def engine() -> Iterator[Engine]:
-    """A dedicated scratch schema so parallel agents on ``uap_test`` never race.
+def engine(isolated_engine: Engine) -> Engine:
+    """The module's isolated schema (migrations applied by ``tests/conftest.py``).
 
-    ``uap_test`` is shared with other test modules (and other agents), so
-    dropping/creating tables in ``public`` would clobber concurrent runs. This
-    fixture creates an isolated schema and pins ``search_path`` to it.
+    ``uap_test`` is shared with other test modules (and other agents), so a
+    per-module schema keeps this module's writes from clobbering concurrent
+    runs. The schema is created and migrated once per module by ``conftest``.
     """
-
-    from sqlalchemy.engine import make_url
-
-    schema = f"durable_rt_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema},public"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+    return isolated_engine
 
 @pytest.fixture()
 def session_factory(engine: Engine) -> sessionmaker[Session]:

@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from collections import deque
@@ -168,6 +169,22 @@ class PruneRequest(BaseModel):
 
     older_than_days: int
     limit: int | None = None
+
+class ForkRequest(BaseModel):
+    """Body of ``POST /api/executions/{id}/fork`` (both fields optional)."""
+
+    from_seq: int | None = None
+    label: str = "fork"
+
+class RerunRequest(BaseModel):
+    """Body of ``POST /api/executions/{id}/rerun``.
+
+    ``input`` is an optional override: omitted (or ``None``) reuses the source
+    execution's original input verbatim; present runs the new text through the
+    same workflow.
+    """
+
+    input: str | None = None
 
 
 class SandboxRunRequest(BaseModel):
@@ -1157,6 +1174,7 @@ def create_app(
         *,
         user_id: str | None = None,
         workspace_id: str | None = None,
+        force_domain: str | None = None,
     ) -> dict[str, Any]:
         """Entry -> Router -> workflow -> dispatch; return the task payload.
 
@@ -1165,12 +1183,24 @@ def create_app(
         one: no duplicated routing, no second execution path. Returns either
         ``{"status": "clarification", "question": ...}`` or the accepted-task
         payload.
+
+        ``force_domain`` pins the workflow to a known domain instead of letting
+        the Entry Workflow re-classify the input. ``POST /api/executions/{id}/
+        rerun`` uses it so a changed input still runs through the SAME workflow
+        the user is reusing, rather than silently hopping to another domain.
         """
         outcome = entry.run(UserRequest(raw_input=raw_input, user_id=user_id))
         if outcome.needs_clarification or outcome.spec is None:
             return {"status": "clarification", "question": outcome.question}
 
-        decision = router.route(outcome.spec)
+        spec = outcome.spec
+        if force_domain is not None:
+            try:
+                spec = spec.model_copy(update={"domain": Domain(force_domain)})
+            except ValueError:
+                pass  # unknown domain: fall through to normal routing
+
+        decision = router.route(spec)
         if decision.domain not in _EXECUTABLE or decision.target is None:
             return {
                 "status": "clarification",
@@ -1180,7 +1210,6 @@ def create_app(
                 ),
             }
 
-        spec = outcome.spec
         try:
             workflow = workflow_for(spec, decision)
         except ScopeRuleError as exc:
@@ -1344,6 +1373,25 @@ def create_app(
         wf = _workflow_map.get(wf_name)
         if wf is not None and hasattr(wf, "graph_spec"):
             return wf.graph_spec()
+        return None
+
+    def _domain_from_ref(workflow_ref: str | None) -> str | None:
+        """Map a stored ``workflow_ref`` (e.g. ``"research@v1"``) to a domain.
+
+        Used by rerun to pin the reused workflow's domain. Returns ``None`` when
+        the ref is absent or unrecognized, letting normal routing decide.
+        """
+
+        if not workflow_ref:
+            return None
+        name = str(workflow_ref).split("@", 1)[0].strip().lower()
+        for domain in (Domain.RESEARCH, Domain.BBP, Domain.LEARNING):
+            if domain.value == name:
+                return domain.value
+        # Tolerate class-style refs ("ResearchWorkflow") the Library may store.
+        for domain in (Domain.RESEARCH, Domain.BBP, Domain.LEARNING):
+            if domain.value in name:
+                return domain.value
         return None
 
     def _evidence_source_for(task_id: str, app_ref: Any) -> str:
@@ -1907,6 +1955,280 @@ def create_app(
         cutoff = datetime.now(timezone.utc) - timedelta(days=body.older_than_days)
         deleted = svc.prune_executions(cutoff, limit=body.limit)
         return {"deleted": deleted, "older_than_days": body.older_than_days}
+
+    # -- /api/executions/{id}: reuse (fork / rerun) + delete --------------- #
+    #
+    # Reuse-before-delete: a user who is done with a run can BRANCH it (fork),
+    # REPLAY it with new input (rerun), and only then DELETE the original. All
+    # three accept EITHER id form the UI might hold (the durable row id OR the
+    # client-facing correlation id) and sit behind the app-level token gate.
+
+    def _execution_actor(request: Request) -> Any:
+        """Return the resolved identity, failing closed when auth is on."""
+
+        identity = get_current_identity(request)
+        if identity is None and auth_enabled():
+            raise HTTPException(status_code=401, detail="unauthorized")
+        return identity
+
+    def _require_execution_access(request: Request, requested_by: str | None) -> Any:
+        """Authorize the caller against one execution's requester.
+
+        Rule (mirrored in the DELETE docstring): an admin may act on ANY
+        execution; a member may act only on a run they requested; a viewer may
+        not mutate runs at all. A run with no recorded requester is treated as
+        operator-owned and is admin-only once auth is on.
+        """
+
+        identity = _execution_actor(request)
+        if identity is None:
+            return None  # auth disabled: single-user local mode
+        if identity.role == "viewer":
+            raise HTTPException(
+                status_code=403, detail="forbidden: viewers cannot manage runs"
+            )
+        if identity.role == "admin":
+            return identity
+        if requested_by is not None and requested_by == identity.user_id:
+            return identity
+        raise HTTPException(
+            status_code=403,
+            detail="forbidden: a member may only manage their own runs",
+        )
+
+    def _remove_artifact_dir(*candidate_ids: str | None) -> dict[str, Any]:
+        """Remove artifact directories for the given ids; report honestly.
+
+        Artifacts live at ``<runs_root>/artifacts/<task_id>/`` and are NOT
+        covered by the DB cascade, so a delete that skipped them would leak
+        files. Returns ``{"removed": [...], "left_behind": [...]}`` — a
+        directory that exists but could not be removed is reported, never
+        silently ignored.
+        """
+
+        removed: list[str] = []
+        left_behind: list[str] = []
+        for candidate in candidate_ids:
+            if not candidate:
+                continue
+            directory = runs_root / "artifacts" / str(candidate)
+            if not directory.is_dir():
+                continue
+            try:
+                shutil.rmtree(directory)
+                removed.append(str(candidate))
+            except OSError as exc:  # permissions, busy files, ...
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "artifact directory could not be removed",
+                    level=logging.WARNING,
+                    execution_id=str(candidate),
+                )
+                left_behind.append(str(candidate))
+        return {"removed": removed, "left_behind": left_behind}
+
+    async def _drive_durable_run(
+        record: RunRecord | None,
+        execution_id: str,
+        *,
+        workflow_ref: str | None = None,
+    ) -> bool:
+        """Drive a durable (slice) execution to completion; ``True`` if started.
+
+        Used to make a fork actually RUN. The slice's resume path loads the
+        row's pinned graph + copied checkpoint state, so a forked execution
+        continues from the branch point instead of restarting. Returns
+        ``False`` when no slice is wired (the caller must then run it), so the
+        route can say so rather than hand back a dead id.
+        """
+
+        slice_runner = getattr(app.state, "slice", None)
+        if slice_runner is None or not hasattr(slice_runner, "resume"):
+            return False
+        if app.state.run_inline:
+            await _execute_slice_resume(record, execution_id, slice_runner)
+        else:
+            task = asyncio.create_task(
+                _execute_slice_resume(record, execution_id, slice_runner)
+            )
+            app.state.background.add(task)
+            task.add_done_callback(app.state.background.discard)
+        return True
+
+    @app.post("/api/executions/{execution_id}/fork")
+    async def fork_execution_route(
+        request: Request, execution_id: str, body: ForkRequest | None = None
+    ) -> dict[str, Any]:
+        """Fork a finished execution into a NEW, RUNNABLE branch.
+
+        Body (both optional): ``from_seq`` (checkpoint sequence to branch from;
+        default latest) and ``label``. Returns the new execution id AND its
+        correlation id.
+
+        Authorization: the same rule as DELETE — an admin may fork ANY
+        execution; a member only their own (``requested_by``); a viewer may not
+        fork at all. The fork inherits the source's ``requested_by``.
+
+        The fork is STARTED here (through the same slice/worker path that drives
+        ``POST /tasks`` and ``/resume``), so the returned id is live. When no
+        durable slice is wired, ``started`` is ``false`` and ``next_step``
+        states plainly that the caller must run it — the id is never silently
+        dead.
+        """
+
+        body = body or ForkRequest()
+        svc = getattr(app.state, "service", None)
+        if svc is None or not hasattr(svc, "fork_execution"):
+            raise HTTPException(
+                status_code=503, detail="durable execution service unavailable"
+            )
+        try:
+            source = svc.source_for_reuse(execution_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"unknown execution {execution_id!r}")
+        _require_execution_access(request, source["requested_by"])
+
+        try:
+            forked = svc.fork_execution(
+                execution_id, from_seq=body.from_seq, label=body.label
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"unknown execution {execution_id!r}")
+
+        record = RunRecord(
+            task_id=forked["correlation_id"] or forked["execution_id"],
+            domain=source.get("workflow_ref") or "",
+            workflow=source.get("workflow_ref") or "",
+            input=source.get("input") or "",
+            workspace_id=source.get("workspace_id"),
+            requested_by=source.get("requested_by"),
+        )
+        runs[record.task_id] = record
+        started = await _drive_durable_run(record, forked["execution_id"])
+
+        payload: dict[str, Any] = {
+            "execution_id": forked["execution_id"],
+            "correlation_id": forked["correlation_id"],
+            "status": forked["status"],
+            "forked_from": source["execution_id"],
+            "from_seq": body.from_seq,
+            "label": body.label,
+            "started": started,
+        }
+        if not started:
+            payload["next_step"] = (
+                "not started: no durable slice is wired, so this fork will not "
+                f"run on its own. Start it with POST /api/executions/"
+                f"{forked['execution_id']}/resume once a worker is available."
+            )
+        return payload
+
+    @app.post("/api/executions/{execution_id}/rerun")
+    async def rerun_execution_route(
+        request: Request, execution_id: str, body: RerunRequest | None = None
+    ) -> dict[str, Any]:
+        """Reuse a finished execution's workflow to run it again — the "adapt" case.
+
+        Body: optional ``input`` override. Omitted -> the original input is
+        reused verbatim; present -> the new text runs through the SAME workflow
+        (the source's domain is pinned so a changed input cannot silently hop to
+        another workflow). Returns the new task/execution payload.
+
+        Authorization: same rule as DELETE/fork — admin any, member own only,
+        viewer forbidden.
+        """
+
+        body = body or RerunRequest()
+        svc = getattr(app.state, "service", None)
+        if svc is None or not hasattr(svc, "source_for_reuse"):
+            raise HTTPException(
+                status_code=503, detail="durable execution service unavailable"
+            )
+        try:
+            source = svc.source_for_reuse(execution_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"unknown execution {execution_id!r}")
+        _require_execution_access(request, source["requested_by"])
+
+        raw_input = body.input if body.input is not None else source.get("input") or ""
+        if not raw_input.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="no input to rerun: the source execution has no reusable input",
+            )
+
+        result = await _start_task(
+            raw_input,
+            user_id=source.get("requested_by"),
+            workspace_id=source.get("workspace_id"),
+            force_domain=_domain_from_ref(source.get("workflow_ref")),
+        )
+        return {
+            "rerun_of": source["execution_id"],
+            "input": raw_input,
+            "reused_original_input": body.input is None,
+            **result,
+        }
+
+    @app.delete("/api/executions/{execution_id}")
+    async def delete_execution_route(request: Request, execution_id: str) -> dict[str, Any]:
+        """Delete ONE finished execution and everything that belongs to it.
+
+        Accepts EITHER the durable row id OR the client-facing correlation id.
+
+        REFUSES a live run (``pending`` / ``running`` / ``paused`` /
+        ``awaiting_approval``) with **409** and a clear reason: deleting a
+        running execution out from under its worker is a data-integrity bug.
+
+        Authorization: behind the app-level token gate. With a user key, an
+        ADMIN may delete ANY execution; a MEMBER may delete only their OWN runs
+        (matching ``requested_by``); a viewer may not delete at all.
+
+        Returns the execution id and the child row counts removed by the
+        ``ON DELETE CASCADE`` (events / checkpoints / decision traces / node
+        views). Artifacts live outside the database and are removed explicitly:
+        the response reports the directories removed and, if any could not be
+        removed, lists them under ``artifacts.left_behind`` rather than leaking
+        them silently.
+        """
+
+        svc = getattr(app.state, "service", None)
+        if svc is None or not hasattr(svc, "delete_execution"):
+            raise HTTPException(
+                status_code=503, detail="durable execution service unavailable"
+            )
+        # Resolve + authorize BEFORE mutating: a member must not be able to
+        # delete someone else's run and only then be told "forbidden".
+        try:
+            source = svc.source_for_reuse(execution_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"unknown execution {execution_id!r}")
+        _require_execution_access(request, source.get("requested_by"))
+
+        try:
+            result = svc.delete_execution(execution_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"unknown execution {execution_id!r}")
+        except ValueError as exc:
+            # A live run: 409 Conflict, with the reason.
+            raise HTTPException(status_code=409, detail=redact_text(str(exc)))
+
+        artifacts = _remove_artifact_dir(
+            result.get("correlation_id"), result.get("execution_id")
+        )
+        # The in-memory run record (if any) must not outlive the durable row.
+        for key in (result.get("execution_id"), result.get("correlation_id")):
+            if key:
+                runs.pop(key, None)
+                drop_control(str(key))
+
+        return {
+            "execution_id": result["execution_id"],
+            "correlation_id": result.get("correlation_id"),
+            "deleted": result["deleted"],
+            "artifacts": artifacts,
+        }
 
     # -- /api/resources/* ------------------------------------------------ #
 

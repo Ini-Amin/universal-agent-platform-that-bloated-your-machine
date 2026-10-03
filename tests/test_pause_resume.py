@@ -25,31 +25,10 @@ from uap.runtime import CheckpointStore, ExecutionService, Worker
 from uap.server import create_app
 
 
-# Dedicated scratch schema for test isolation
-_TEST_SCHEMA = f"pause_test_{uuid.uuid4().hex[:8]}"
-
-
 @pytest.fixture(scope="module")
-def engine() -> Iterator[Engine]:
-    raw = create_db_engine()
-    with raw.connect() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{_TEST_SCHEMA}"'))
-        conn.commit()
-
-    schema_engine = create_db_engine(
-        connect_args={"options": f"-csearch_path={_TEST_SCHEMA},public"}
-    )
-    # Base already imported at module level
-
-    Base.metadata.create_all(schema_engine)
-    try:
-        yield schema_engine
-    finally:
-        schema_engine.dispose()
-        with raw.connect() as conn:
-            conn.execute(text(f'DROP SCHEMA IF EXISTS "{_TEST_SCHEMA}" CASCADE'))
-            conn.commit()
-        raw.dispose()
+def engine(isolated_engine: Engine) -> Engine:
+    """Use the module's isolated schema (migrations applied by conftest)."""
+    return isolated_engine
 
 
 @pytest.fixture()

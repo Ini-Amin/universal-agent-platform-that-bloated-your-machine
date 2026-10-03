@@ -156,29 +156,9 @@ _db = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
 @pytest.fixture(scope="module")
-def engine():
-    from sqlalchemy import text
-    from sqlalchemy.engine import make_url
-
-    from uap.db import Base, create_db_engine
-
-    schema = f"faults_rt_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema},public"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+def engine(isolated_engine):
+    """The module's isolated schema (migrations applied by ``tests/conftest.py``)."""
+    return isolated_engine
 
 
 @pytest.fixture()

@@ -26,29 +26,8 @@ BOOTSTRAP_TOKEN = "bootstrap_admin_secret_token_12345"
 
 
 @pytest.fixture(scope="module")
-def engine() -> Iterator[Engine]:
-    """A dedicated scratch schema so parallel agents on DB never race."""
-    from sqlalchemy.engine import make_url
-
-    schema = f"user_mgmt_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema}"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-            conn.execute(text('TRUNCATE users, workspace_members RESTART IDENTITY CASCADE'))
-        admin.dispose()
-
+def engine(isolated_engine: Engine) -> Engine:
+    return isolated_engine
 
 @pytest.fixture()
 def session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -374,7 +353,7 @@ def test_shared_workspaces_scoping(
 
 
 def test_backward_compat_no_token_no_users(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: Engine
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: Engine, apply_migrations
 ) -> None:
     """When UAP_API_TOKEN is unset and no users exist in DB, platform behaves without auth."""
     # Dedicated scratch schema with zero users
@@ -389,7 +368,7 @@ def test_backward_compat_no_token_no_users(
         {"options": f"-csearch_path={schema}"}
     )
     eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng)
+    apply_migrations(scoped_url.render_as_string(hide_password=False))
     try:
         monkeypatch.delenv("UAP_API_TOKEN", raising=False)
         monkeypatch.setattr("uap.db.engine.get_engine", lambda: eng)

@@ -395,7 +395,7 @@ requires_db = pytest.mark.skipif(
 
 
 @requires_db
-def test_library_against_real_database() -> None:
+def test_library_against_real_database(isolated_db) -> None:
     """End-to-end on uap_test using the real uap.db repositories."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker

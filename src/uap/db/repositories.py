@@ -432,6 +432,65 @@ class ExecutionRepository:
         self._session.flush()
         return int(result.rowcount or 0)
 
+    def count_children(self, execution_id: uuid.UUID) -> dict[str, int]:
+        """Count the rows that CASCADE with ``execution_id``.
+
+        Returns one entry per child table (``execution_events``,
+        ``execution_checkpoints``, ``decision_traces``, ``node_views``) so a
+        caller can report exactly what a delete removed. Counts are read inside
+        the caller's transaction; the caller owns commit/rollback.
+        """
+
+        from uap.db.models.checkpoint import ExecutionCheckpoint
+        from uap.db.models.trace import DecisionTraceRow
+        from uap.db.models.view import NodeViewRow
+
+        counts: dict[str, int] = {}
+        for label, model in (
+            ("execution_events", ExecutionEvent),
+            ("execution_checkpoints", ExecutionCheckpoint),
+            ("decision_traces", DecisionTraceRow),
+            ("node_views", NodeViewRow),
+        ):
+            counts[label] = int(
+                self._session.execute(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.execution_id == execution_id)
+                ).scalar_one()
+            )
+        return counts
+
+    def delete(self, execution_id: uuid.UUID) -> dict[str, int]:
+        """Delete ONE execution row and report what CASCADEd away.
+
+        Refuses a live run (``pending``/``running``/``paused``/
+        ``awaiting_approval``) by raising :class:`ValueError`: deleting a
+        running execution out from under its worker is a data-integrity bug,
+        and the row's ``status`` is the authoritative liveness signal.
+
+        Child rows (``execution_events``, ``execution_checkpoints``,
+        ``decision_traces``, ``node_views``) are removed by the ``ON DELETE
+        CASCADE`` foreign keys; their pre-delete counts are captured first and
+        returned so the caller can prove nothing leaked. Raises
+        :class:`LookupError` when the execution does not exist.
+
+        Returns ``{"executions": 1, "<child table>": <rows deleted>, ...}``.
+        """
+
+        row = self.get(execution_id)
+        if row is None:
+            raise LookupError(f"execution {execution_id} not found")
+        if row.status not in TERMINAL_EXECUTION_STATUSES:
+            raise ValueError(
+                f"execution {execution_id} is {row.status.value!r} (live); "
+                "only a finished run may be deleted"
+            )
+        counts = self.count_children(execution_id)
+        self._session.execute(delete(Execution).where(Execution.id == execution_id))
+        self._session.flush()
+        return {"executions": 1, **counts}
+
 
 # --------------------------------------------------------------------------- #
 # Event store

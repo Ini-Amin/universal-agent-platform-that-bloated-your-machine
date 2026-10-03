@@ -83,30 +83,10 @@ _KNOWLEDGE_TABLES = (
 # Fixtures
 # --------------------------------------------------------------------------- #
 
-@pytest.fixture(scope="session")
-def engine() -> Iterator[Engine]:
-    if not DATABASE_REACHABLE:
-        pytest.skip(f"PostgreSQL not reachable at {TEST_DATABASE_URL}")
-
-    from sqlalchemy.engine import make_url
-
-    schema = f"know_{uuid.uuid4().hex[:8]}"
-    admin = create_db_engine(TEST_DATABASE_URL)
-    with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    scoped_url = make_url(TEST_DATABASE_URL).update_query_dict(
-        {"options": f"-csearch_path={schema},public"}
-    )
-    eng = create_db_engine(scoped_url.render_as_string(hide_password=False))
-    Base.metadata.create_all(eng, checkfirst=False)
-    try:
-        yield eng
-    finally:
-        eng.dispose()
-        with admin.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+@pytest.fixture(scope="module")
+def engine(isolated_engine: Engine) -> Engine:
+    """The module's isolated schema (migrations applied by ``tests/conftest.py``)."""
+    return isolated_engine
 
 @pytest.fixture()
 def session_factory(engine: Engine) -> Iterator[sessionmaker[Session]]:

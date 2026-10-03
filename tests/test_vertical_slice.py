@@ -326,47 +326,6 @@ if _SKIP is not None:
 db_test = pytest.mark.skipif(_SKIP is not None, reason=_SKIP or "")
 
 
-@pytest.fixture()
-def db_session_factory():
-    """A session factory over ``uap_test`` with per-test table isolation.
-
-    The committed schema already lives in ``public`` (alembic-migrated), so a
-    dedicated-schema ``create_all`` would be skipped by ``checkfirst`` and every
-    write would still land in ``public``. Instead we use ``public`` directly and
-    TRUNCATE the tables this slice touches before and after each test, exactly
-    like ``test_durable_runtime`` — deterministic and full-suite-safe.
-    """
-    from sqlalchemy import text
-
-    from uap.db import create_db_engine, create_session_factory
-
-    engine = create_db_engine(_resolved_test_url())
-    tables = (
-        "knowledge_events",
-        "knowledge_provenance",
-        "knowledge_items",
-        "decision_traces",
-        "execution_checkpoints",
-        "execution_events",
-        "executions",
-        "workflow_versions",
-        "workflow_definitions",
-    )
-    statement = text(
-        "TRUNCATE "
-        + ", ".join(f'"{name}"' for name in tables)
-        + " RESTART IDENTITY CASCADE"
-    )
-    with engine.begin() as conn:
-        conn.execute(statement)
-    try:
-        yield create_session_factory(engine)
-    finally:
-        with engine.begin() as conn:
-            conn.execute(statement)
-        engine.dispose()
-
-
 @db_test
 def test_full_research_run_completes_with_artifacts(db_session_factory, tmp_path):
     slice_ = PlatformSlice(
