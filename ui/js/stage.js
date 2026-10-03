@@ -15,6 +15,7 @@ const KIND_TITLES = {
   image: 'Image',
   video: 'Video',
   iframe: 'Embedded page',
+  search: 'Search',
   code: 'Code',
   whiteboard: 'Whiteboard',
   terminal: 'Terminal',
@@ -28,24 +29,58 @@ const KIND_TITLES = {
 // X-Frame-Options / CSP frame-ancestors, so it renders inside an <iframe>.
 export const EXCALIDRAW_URL = 'https://excalidraw.com/';
 
-export const SEARCH_STATUS_MARKDOWN = `# 🔍 Knowledge & Web Search
-
-> **Search Provider Not Configured**
-> No search API endpoint or MCP search server is currently available on the server.
-
-### What Was Checked
-- **Backend API Routes**: The server provides \`/tasks\`, \`/events\`, \`/api/executions\`, \`/api/sandbox/run\`, but no \`/api/search\` route exists in the API specification.
-- **Registered Tools (\`GET /api/resources/tools\`)**: 14 tools registered (local file tools and 11 \`bugbounty-mcp\` security tools). No search provider (e.g., \`exa.search\`, \`brave.search\`, or \`tavily.search\`) is registered.
-- **Research Workflow (\`src/uap/workflows/research.py\`)**: The research workflow attempts to resolve:
-  1. An MCP tool matching \`*.search\` or containing \`search\`
-  2. An HTTP search client (Brave/Exa API key)
-  3. Falls back to deterministic simulation stubs (\`stub:web\`)
-
-### How to Enable User-Driven Search
-To allow users to search directly from the canvas, a backend route (e.g. \`POST /api/search\` or \`GET /api/search?q=...\`) or an MCP search server must be configured.`;
-
 const DEFAULT_IFRAME_SANDBOX =
   'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals';
+
+// Hosts that send X-Frame-Options or CSP frame-ancestors on their pages, so a
+// browser shows "refused to connect" instead of an embedded copy. Checked with
+// curl on 2026-10-03; a heuristic only, so the card offers "Try embedding anyway".
+const FRAME_BLOCKING_HOSTS = [
+  'google.com', 'bing.com', 'duckduckgo.com', 'github.com', 'x.com', 'twitter.com',
+  'facebook.com', 'instagram.com', 'linkedin.com', 'reddit.com', 'youtube.com',
+  'stackoverflow.com', 'amazon.com', 'medium.com', 'npmjs.com', 'pypi.org',
+  'developer.mozilla.org', 'openai.com',
+];
+
+// Pages on those hosts that are made for embedding.
+const FRAME_FRIENDLY_PATHS = [
+  { host: 'youtube.com', prefix: '/embed/' },
+  { host: 'google.com', prefix: '/maps/embed' },
+];
+
+/** The blocking host name for an http(s) URL that browsers usually refuse to frame, else null. */
+export function framingBlockedHost(url) {
+  let u;
+  try {
+    u = new URL(url, 'http://localhost/');
+  } catch (_e) {
+    return null;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  const hit = FRAME_BLOCKING_HOSTS.find((h) => host === h || host.endsWith(`.${h}`));
+  if (!hit) return null;
+  if (FRAME_FRIENDLY_PATHS.some((p) => p.host === hit && u.pathname.startsWith(p.prefix))) return null;
+  return hit;
+}
+
+/** Absolute http(s) form of a card URL, or '' when it cannot be opened in a tab. */
+function openableUrl(url) {
+  try {
+    const base = (typeof window !== 'undefined' && window.location && window.location.href) || 'http://localhost/';
+    const u = new URL(url, base);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+// Per-kind body builders supplied by the host page (so this module never fetches).
+const _viewBuilders = new Map();
+export function registerViewBuilder(kind, fn) {
+  if (typeof fn === 'function') _viewBuilders.set(kind, fn);
+  else _viewBuilders.delete(kind);
+}
 
 export function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -1728,7 +1763,7 @@ export function createStage(containerEl, options = {}) {
       <ul class="stage-guide-list">
         <li><strong>Code Editor</strong> — edit real files; open your own project with the 📂 <strong>Open Folder</strong> button.</li>
         <li><strong>Terminal</strong> — a shell in your workspace.</li>
-        <li><strong>Web Page</strong> — embed a site by URL (browser).</li>
+        <li><strong>Web Page</strong> — embed a site by URL. Sites that forbid embedding (Google, GitHub…) offer to open in a new tab instead.</li>
         <li><strong>Whiteboard</strong> — draw on an Excalidraw canvas.</li>
         <li><strong>Note</strong> — a Markdown scratchpad.</li>
       </ul>
@@ -2567,36 +2602,36 @@ export function createStage(containerEl, options = {}) {
         const controls = document.createElement('div');
         controls.className = 'stage-browser-controls';
 
-        const btnBack = document.createElement('button');
-        btnBack.type = 'button';
-        btnBack.className = 'stage-browser-btn stage-browser-back';
-        btnBack.title = 'Back';
-        btnBack.textContent = '‹';
-
         const btnReload = document.createElement('button');
         btnReload.type = 'button';
         btnReload.className = 'stage-browser-btn stage-browser-reload';
         btnReload.title = 'Reload';
+        btnReload.setAttribute('aria-label', 'Reload');
         btnReload.textContent = '↻';
 
         const addressBar = document.createElement('div');
         addressBar.className = 'stage-browser-address-bar';
 
-        const lockIcon = document.createElement('span');
-        lockIcon.className = 'stage-browser-lock';
-        lockIcon.textContent = '🔒';
-
         const urlText = document.createElement('span');
         urlText.className = 'stage-browser-url-text';
         urlText.textContent = url || 'about:blank';
 
-        addressBar.appendChild(lockIcon);
+        // The padlock used to show for every URL, including plain http.
+        const scheme = /^(https?):/i.test(url) ? url.slice(0, url.indexOf(':')).toLowerCase() : '';
+        if (scheme) {
+          const lockIcon = document.createElement('span');
+          lockIcon.className = 'stage-browser-lock';
+          lockIcon.textContent = scheme === 'https' ? '🔒' : '⚠';
+          lockIcon.title = scheme === 'https' ? 'Secure connection (https)' : 'Not secure (http)';
+          addressBar.appendChild(lockIcon);
+        }
         addressBar.appendChild(urlText);
 
         const btnCopy = document.createElement('button');
         btnCopy.type = 'button';
         btnCopy.className = 'stage-browser-btn stage-browser-copy';
         btnCopy.title = 'Copy URL';
+        btnCopy.setAttribute('aria-label', 'Copy URL');
         btnCopy.textContent = 'Copy';
         btnCopy.addEventListener('click', async () => {
           if (url) {
@@ -2606,10 +2641,14 @@ export function createStage(containerEl, options = {}) {
           }
         });
 
-        controls.appendChild(btnBack);
         controls.appendChild(btnReload);
         controls.appendChild(addressBar);
         controls.appendChild(btnCopy);
+
+        // The card header already has "Open ↗". A page that refuses embedding only
+        // shows the browser's "refused to connect" page, which cannot be detected
+        // here, so known blockers get an explicit notice below instead.
+        const openHref = spec.srcdoc ? '' : openableUrl(url);
 
         if (!url && !spec.srcdoc) {
           const emptyEl = document.createElement('div');
@@ -2621,33 +2660,81 @@ export function createStage(containerEl, options = {}) {
           return body;
         }
 
-        const frame = document.createElement('iframe');
-        frame.className = 'stage-iframe';
-        if (spec.srcdoc) {
-          frame.srcdoc = spec.srcdoc;
-        } else {
-          frame.src = url;
-        }
-        frame.title = spec.title || 'Embedded view';
-        frame.setAttribute('loading', 'lazy');
-        frame.setAttribute('referrerpolicy', 'no-referrer');
-        if (spec.sandbox === false) {
-          // explicit opt-out: no sandbox attribute at all
-        } else if (typeof spec.sandbox === 'string') {
-          frame.setAttribute('sandbox', spec.sandbox);
-        } else if (Array.isArray(spec.sandbox)) {
-          frame.setAttribute('sandbox', spec.sandbox.join(' '));
-        } else {
-          frame.setAttribute('sandbox', DEFAULT_IFRAME_SANDBOX);
-        }
-        if (spec.allow) frame.setAttribute('allow', spec.allow);
+        let frame = null;
+        const mountFrame = () => {
+          frame = document.createElement('iframe');
+          frame.className = 'stage-iframe';
+          if (spec.srcdoc) {
+            frame.srcdoc = spec.srcdoc;
+          } else {
+            frame.src = url;
+          }
+          frame.title = spec.title || 'Embedded view';
+          frame.setAttribute('loading', 'lazy');
+          frame.setAttribute('referrerpolicy', 'no-referrer');
+          if (spec.sandbox === false) {
+            // explicit opt-out: no sandbox attribute at all
+          } else if (typeof spec.sandbox === 'string') {
+            frame.setAttribute('sandbox', spec.sandbox);
+          } else if (Array.isArray(spec.sandbox)) {
+            frame.setAttribute('sandbox', spec.sandbox.join(' '));
+          } else {
+            frame.setAttribute('sandbox', DEFAULT_IFRAME_SANDBOX);
+          }
+          if (spec.allow) frame.setAttribute('allow', spec.allow);
+          body.appendChild(frame);
+          btnReload.disabled = false;
+        };
 
         btnReload.addEventListener('click', () => {
-          if (url) { try { frame.src = url; } catch (_e) {} }
+          if (url && frame) { try { frame.src = url; } catch (_e) {} }
         });
 
         body.appendChild(controls);
-        body.appendChild(frame);
+
+        const blockedHost = spec.srcdoc ? null : framingBlockedHost(url);
+        if (blockedHost) {
+          btnReload.disabled = true;
+          const note = document.createElement('div');
+          note.className = 'stage-embed-blocked';
+          note.setAttribute('role', 'status');
+
+          const title = document.createElement('div');
+          title.className = 'stage-embed-blocked-title';
+          title.textContent = `${blockedHost} can’t be shown inside this page`;
+
+          const text = document.createElement('div');
+          text.className = 'stage-embed-blocked-text';
+          text.textContent = 'The site tells browsers not to embed it (an X-Frame-Options or frame-ancestors header), '
+            + 'so an embedded copy would only say “refused to connect”.';
+
+          const actions = document.createElement('div');
+          actions.className = 'stage-embed-blocked-actions';
+          if (openHref) {
+            const open = document.createElement('a');
+            open.className = 'btn btn-accent btn-sm';
+            open.href = openHref;
+            open.target = '_blank';
+            open.rel = 'noopener noreferrer';
+            open.textContent = 'Open in new tab ↗';
+            actions.appendChild(open);
+          }
+          const anyway = document.createElement('button');
+          anyway.type = 'button';
+          anyway.className = 'btn btn-sm';
+          anyway.textContent = 'Try embedding anyway';
+          anyway.addEventListener('click', () => {
+            note.remove();
+            mountFrame();
+          });
+          actions.appendChild(anyway);
+
+          note.append(title, text, actions);
+          body.appendChild(note);
+          return body;
+        }
+
+        mountFrame();
         return body;
       }
 
@@ -2782,6 +2869,15 @@ export function createStage(containerEl, options = {}) {
 
       case 'placeholder':
       default: {
+        const custom = _viewBuilders.get(spec.kind);
+        if (custom) {
+          try {
+            return custom(body, spec, emit);
+          } catch (err) {
+            body.textContent = '';
+            return missing(body, spec.kind, `a working builder (${(err && err.message) || err})`);
+          }
+        }
         const box = document.createElement('div');
         box.className = 'stage-placeholder';
         const unknown = spec.kind && spec.kind !== 'placeholder';

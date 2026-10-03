@@ -333,7 +333,7 @@
                 <span class="tool-palette-item-name">Search</span>
                 <span class="tool-palette-item-desc">Web and knowledge search</span>
               </div>
-              <span class="tool-palette-item-badge">Check</span>
+              <span class="tool-palette-item-badge">Launch</span>
             </button>
 
             <button type="button" class="tool-palette-item" data-tool="iframe">
@@ -372,7 +372,7 @@
             </div>
             <div class="tool-palette-field">
               <label for="tool-input-url" class="tool-field-label">URL <span class="required">*</span></label>
-              <input type="url" id="tool-input-url" class="tool-field-input" placeholder="https://..." required>
+              <input type="text" inputmode="url" id="tool-input-url" class="tool-field-input" placeholder="https://..." autocomplete="off" autocapitalize="off" spellcheck="false">
               <span id="tool-url-hint" class="tool-field-hint"></span>
             </div>
             <div class="tool-palette-field">
@@ -463,7 +463,9 @@
     import { canvasStore, executionStore, eventStore, uiStore } from './js/state.js';
     import { createUndoStack } from './js/undo.js';
     import { initGraphCanvas } from './js/graph-canvas.js';
-    import { createStage, setEditorBodyBuilder, SEARCH_STATUS_MARKDOWN } from './js/stage.js';
+    import { createStage, setEditorBodyBuilder, registerViewBuilder } from './js/stage.js';
+    import { buildSearchBody } from './js/search.js';
+    import { normalizeToolUrl } from './js/url.js';
     import { buildEditorBody } from './js/editor.js';
     import { initInspector } from './js/inspector.js';
     import { createEventStream, initEventConsole } from './js/event-stream.js';
@@ -565,6 +567,14 @@
     // dependency-free; the editor builder is injected here. If Monaco cannot
     // load, editor.js falls back to the textarea and says so in the status bar.
     setEditorBodyBuilder(buildEditorBody);
+
+    // The Search surface needs the knowledge and tool lists, so it is built here
+    // and handed to the stage, which never fetches.
+    registerViewBuilder('search', (body, spec) => buildSearchBody(body, spec, {
+      getKnowledge,
+      getTools,
+      openKnowledge: (item) => uiStore.setState({ selectedResource: { type: 'knowledge', data: item } }),
+    }));
 
     // [SplitPane] Layout segmented control: free canvas (default), 2 or 4
     // regions. The stage persists the choice across reloads, so the active
@@ -877,10 +887,9 @@
         needsInput: false,
       },
       search: {
-        kind: 'markdown',
+        kind: 'search',
         id: 'tool-search',
-        title: 'Search (Not Configured)',
-        markdown: SEARCH_STATUS_MARKDOWN,
+        title: 'Search',
         needsInput: false,
       },
       iframe: {
@@ -889,7 +898,7 @@
         needsInput: true,
         formTitle: 'Add Embedded Web Page',
         urlPlaceholder: 'https://example.com',
-        hint: 'Enter a valid web page URL to embed via iframe.',
+        hint: 'Enter a web address. Sites that forbid embedding (Google, GitHub, …) will offer to open in a new tab instead.',
       },
       video: {
         kind: 'video',
@@ -932,7 +941,7 @@
       hideFormError();
       if (paletteList) paletteList.style.display = 'none';
       if (paletteForm) paletteForm.style.display = 'flex';
-      setTimeout(() => toolInputUrl?.focus(), 50);
+      setTimeout(() => toolInputUrl?.focus({ preventScroll: true }), 50);
     }
 
     function showFormError(msg) {
@@ -951,10 +960,17 @@
 
     function positionPalette() {
       if (!palettePopover || !btnToolsPalette) return;
+      const canvasEl = document.getElementById('canvas');
       const rect = btnToolsPalette.getBoundingClientRect();
-      const canvasRect = document.getElementById('canvas')?.getBoundingClientRect() || { top: 0, left: 0 };
+      const canvasRect = canvasEl?.getBoundingClientRect() || { top: 0, left: 0 };
+      const width = Math.min(380, window.innerWidth - 32);
       const top = (rect.bottom - canvasRect.top) + 6;
-      const left = Math.max(10, Math.min((rect.left - canvasRect.left), window.innerWidth - 400));
+      // Keep the whole popover inside the pane. It was clamped against the window
+      // width in the wrong coordinate space, so on a 1440px screen its right edge
+      // ran past the pane, and focusing the URL field then scrolled the entire
+      // canvas sideways, clipping the header.
+      const maxLeft = Math.max(10, (canvasEl ? canvasEl.clientWidth : window.innerWidth) - width - 12);
+      const left = Math.max(10, Math.min(rect.left - canvasRect.left, maxLeft));
       palettePopover.style.top = `${top}px`;
       palettePopover.style.left = `${left}px`;
     }
@@ -1019,7 +1035,11 @@
         const raw = localStorage.getItem(USER_VIEWS_KEY);
         if (!raw) return [];
         const arr = JSON.parse(raw);
-        return Array.isArray(arr) ? arr : [];
+        if (!Array.isArray(arr)) return [];
+        // Search used to be a static "not configured" markdown card; upgrade a saved one.
+        return arr.map((s) => (s && s.id === 'tool-search' && s.kind === 'markdown'
+          ? { id: s.id, kind: 'search', title: 'Search' }
+          : s));
       } catch (_e) {
         return [];
       }
@@ -1466,14 +1486,17 @@
       if (!activeInputTool) return;
       const url = (toolInputUrl?.value || '').trim();
       if (!url) {
-        showFormError('URL is required.');
+        showFormError('Enter a web address.');
         toolInputUrl?.focus();
         return;
       }
-      let finalUrl = url;
-      if (!/^https?:\/\/|^\/|^data:/i.test(finalUrl)) {
-        finalUrl = 'https://' + finalUrl;
+      const finalUrl = normalizeToolUrl(url);
+      if (!finalUrl) {
+        showFormError('That does not look like a web address. Try example.com or https://example.com/page.');
+        toolInputUrl?.focus();
+        return;
       }
+      hideFormError();
       const customTitle = (toolInputTitle?.value || '').trim();
       const cfg = TOOL_CONFIGS[activeInputTool];
       launchTool(activeInputTool, {
