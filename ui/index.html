@@ -57,41 +57,10 @@
                 </svg>
               </span>
               <span class="sidebar-section-title">Agents</span>
-              <span class="sidebar-section-count">3</span>
+              <span class="sidebar-section-count" data-count-for="agents">0</span>
               <button class="sidebar-section-add" title="Add Agent" aria-label="Add Agent" type="button">+</button>
             </div>
-            <div class="sidebar-section-items">
-              <div class="sidebar-resource-item active" data-view="handoff" role="button" tabindex="0">
-                <span class="sidebar-item-icon">
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                    <rect x="2" y="2" width="12" height="12" rx="3" stroke="currentColor" stroke-width="1.3"/>
-                    <circle cx="6" cy="7" r="1" fill="currentColor"/>
-                    <circle cx="10" cy="7" r="1" fill="currentColor"/>
-                  </svg>
-                </span>
-                <span class="sidebar-item-name">Builder</span>
-                <span class="sidebar-item-dot"></span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                    <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/>
-                    <path d="M11 11L14 14" stroke="currentColor" stroke-width="1.3"/>
-                  </svg>
-                </span>
-                <span class="sidebar-item-name">Researcher</span>
-                <span class="sidebar-item-status">Idle</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                    <path d="M3 8L6 11L13 4" stroke="currentColor" stroke-width="1.3"/>
-                  </svg>
-                </span>
-                <span class="sidebar-item-name">Reviewer</span>
-                <span class="sidebar-item-status">Idle</span>
-              </div>
-            </div>
+            <div class="sidebar-section-items" data-items-for="agents"></div>
           </div>
 
           <!-- 2. Tools -->
@@ -104,35 +73,10 @@
                 </svg>
               </span>
               <span class="sidebar-section-title">Tools</span>
-              <span class="sidebar-section-count">6</span>
+              <span class="sidebar-section-count" data-count-for="tools">0</span>
               <button class="sidebar-section-add" title="Add Tool" aria-label="Add Tool" type="button">+</button>
             </div>
-            <div class="sidebar-section-items">
-              <div class="sidebar-resource-item" data-view="editor" role="button" tabindex="0">
-                <span class="sidebar-item-icon">&lt;/&gt;</span>
-                <span class="sidebar-item-name">Code interpreter</span>
-              </div>
-              <div class="sidebar-resource-item" data-view="preview" role="button" tabindex="0">
-                <span class="sidebar-item-icon">🌐</span>
-                <span class="sidebar-item-name">Browser</span>
-              </div>
-              <div class="sidebar-resource-item" data-view="terminal" role="button" tabindex="0">
-                <span class="sidebar-item-icon">&gt;_</span>
-                <span class="sidebar-item-name">Terminal</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">📁</span>
-                <span class="sidebar-item-name">File system</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">🗄️</span>
-                <span class="sidebar-item-name">Database</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">⚡</span>
-                <span class="sidebar-item-name">API integration</span>
-              </div>
-            </div>
+            <div class="sidebar-section-items" data-items-for="tools"></div>
           </div>
 
           <!-- 3. Skills -->
@@ -141,10 +85,10 @@
               <span class="sidebar-section-chevron">▾</span>
               <span class="sidebar-section-icon">★</span>
               <span class="sidebar-section-title">Skills</span>
-              <span class="sidebar-section-count">6</span>
+              <span class="sidebar-section-count" data-count-for="skills">0</span>
               <button class="sidebar-section-add" title="Add Skill" aria-label="Add Skill" type="button">+</button>
             </div>
-            <div class="sidebar-section-items"></div>
+            <div class="sidebar-section-items" data-items-for="skills"></div>
           </div>
 
           <!-- 4. Knowledge -->
@@ -153,19 +97,10 @@
               <span class="sidebar-section-chevron">▾</span>
               <span class="sidebar-section-icon">📖</span>
               <span class="sidebar-section-title">Knowledge</span>
-              <span class="sidebar-section-count">2</span>
+              <span class="sidebar-section-count" data-count-for="knowledge">0</span>
               <button class="sidebar-section-add" title="Add Knowledge" aria-label="Add Knowledge" type="button">+</button>
             </div>
-            <div class="sidebar-section-items">
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">📄</span>
-                <span class="sidebar-item-name">Product brief</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">📋</span>
-                <span class="sidebar-item-name">Design guidelines</span>
-              </div>
-            </div>
+            <div class="sidebar-section-items" data-items-for="knowledge"></div>
           </div>
 
           <!-- 5. Artifacts -->
@@ -174,24 +109,10 @@
               <span class="sidebar-section-chevron">▾</span>
               <span class="sidebar-section-icon">📦</span>
               <span class="sidebar-section-title">Artifacts</span>
-              <span class="sidebar-section-count">3</span>
+              <span class="sidebar-section-count" data-count-for="artifacts">0</span>
               <button class="sidebar-section-add" title="Add Artifact" aria-label="Add Artifact" type="button">+</button>
             </div>
-            <div class="sidebar-section-items">
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">🌐</span>
-                <span class="sidebar-item-name">usage-dashboard</span>
-                <span class="sidebar-item-badge">Web</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">📄</span>
-                <span class="sidebar-item-name">App.tsx</span>
-              </div>
-              <div class="sidebar-resource-item" role="button" tabindex="0">
-                <span class="sidebar-item-icon">📊</span>
-                <span class="sidebar-item-name">test-results.json</span>
-              </div>
-            </div>
+            <div class="sidebar-section-items" data-items-for="artifacts"></div>
           </div>
         </div>
 
@@ -212,10 +133,10 @@
           </button>
         </div>
         <div class="account-pill" role="button" tabindex="0" title="Account profile">
-          <div class="account-avatar">AK</div>
+          <div class="account-avatar">OP</div>
           <div class="account-info">
-            <span class="account-name">Alex Kim</span>
-            <span class="account-role">Pro workspace</span>
+            <span class="account-name">Operator</span>
+            <span class="account-role">Local workspace</span>
           </div>
           <div class="account-chevrons">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -246,15 +167,15 @@
             </div>
           </div>
           <span class="toolbar-divider"></span>
-          <span class="workspace-title-label">Usage dashboard</span>
-          <div class="env-badge">Development</div>
+          <span class="workspace-title-label">Workspace</span>
+          <div id="env-badge" class="env-badge">Local</div>
         </div>
 
         <div class="workspace-nav-right">
           <div class="run-status-indicator">
             <span class="status-dot"></span>
-            <span id="active-status-badge" class="badge">Run complete</span>
-            <span id="active-task-label" class="run-time-text font-mono">00:42</span>
+            <span id="active-status-badge" class="badge badge-idle">idle</span>
+            <span id="active-task-label" class="run-time-text font-mono">No run</span>
           </div>
           <span class="toolbar-divider"></span>
           <button id="btn-history" class="btn btn-history" title="History">
@@ -297,13 +218,13 @@
             </div>
             <div class="task-context-title-row">
               <input type="text" id="task-input" class="task-context-title-input"
-                     aria-label="Task description" value="Build a customer usage dashboard"
+                     aria-label="Task description" value=""
                      placeholder="What do you want to research?" />
               <button id="btn-proposal" class="btn btn-sm btn-proposal-subtle" title="Preview the workflow before running it">Preview</button>
               <button id="btn-run-task" class="btn btn-accent" style="display: none;">Run</button>
             </div>
             <div class="task-context-subline">
-              <span id="task-context-meta">Builder agent · React + TypeScript · Last run just now</span>
+              <span id="task-context-meta">Ready to run</span>
             </div>
           </div>
 
@@ -1059,46 +980,7 @@
       saveUserViews(activeUserViews);
     }
 
-    // Seed default views on initial startup if none saved
-    const DASHBOARD_SRCDOC = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:20px;font-family:Inter,system-ui,sans-serif;background:#212530;color:#E2E6F0;box-sizing:border-box;}.nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;}.brand{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;}.brand-icon{width:18px;height:18px;background:#DD7FD3;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#1B1E28;font-weight:700;}.brand-sep{color:#9AA1B4;font-weight:400;}.avatar{width:22px;height:22px;border-radius:4px;background:#2A2F3B;font-size:11px;display:flex;align-items:center;justify-content:center;color:#9AA1B4;}.heading-row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;}.title{font-size:20px;font-weight:600;margin:0 0 4px 0;color:#FFFFFF;}.sub{font-size:12px;color:#9AA1B4;margin:0;}.date-btn{background:#262B36;border:1px solid #2A2F3B;color:#E2E6F0;font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;}.metric-card{background:#1B1E28;border:1px solid #2A2F3B;border-radius:8px;padding:14px;}.metric-lbl{font-size:12px;color:#9AA1B4;margin-bottom:6px;}.metric-val-row{display:flex;align-items:baseline;justify-content:space-between;}.metric-val{font-size:22px;font-weight:600;color:#FFFFFF;}.metric-change{font-size:12px;color:#6FC2B8;font-weight:500;}.chart-box{background:#1B1E28;border:1px solid #2A2F3B;border-radius:8px;padding:14px;margin-bottom:16px;}.chart-head{display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-bottom:10px;}.chart-legend{font-size:11px;color:#9AA1B4;display:flex;align-items:center;gap:6px;font-weight:400;}.chart-dot{width:6px;height:6px;border-radius:50%;background:#DD7FD3;}.chart-svg{width:100%;height:85px;}.dates-row{display:flex;justify-content:space-between;font-size:10px;color:#9AA1B4;margin-top:6px;}.endpoints{background:#1B1E28;border:1px solid #2A2F3B;border-radius:8px;padding:14px;}.endpoints-head{display:flex;justify-content:space-between;font-size:12px;color:#9AA1B4;margin-bottom:8px;}.endpoint-row{display:flex;align-items:center;justify-content:space-between;font-size:12px;}.endpoint-bar{flex:1;height:6px;background:#FFFFFF;border-radius:3px;margin:0 16px;}</style></head><body><div class="nav"><div class="brand"><div class="brand-icon">⌘</div><span>acme</span><span class="brand-sep">/ Analytics</span></div><div class="avatar">AK</div></div><div class="heading-row"><div><h2 class="title">Usage overview</h2><p class="sub">Monitor your product's performance at a glance.</p></div><button class="date-btn">📅 Last 7 days ▾</button></div><div class="metrics"><div class="metric-card"><div class="metric-lbl">API requests</div><div class="metric-val-row"><span class="metric-val">128,430</span><span class="metric-change">↗ 12.8%</span></div></div><div class="metric-card"><div class="metric-lbl">Active users</div><div class="metric-val-row"><span class="metric-val">2,048</span><span class="metric-change">↗ 8.2%</span></div></div></div><div class="chart-box"><div class="chart-head"><span>Request volume</span><span class="chart-legend"><span class="chart-dot"></span> API requests</span></div><svg class="chart-svg" viewBox="0 0 500 85" preserveAspectRatio="none"><path d="M0,70 C50,70 80,42 140,52 C200,62 240,22 300,36 C360,50 400,18 450,20 C480,22 500,40 500,40" fill="none" stroke="#DD7FD3" stroke-width="2.5" stroke-linecap="round"/></svg><div class="dates-row"><span>Sep 27</span><span>Sep 28</span><span>Sep 29</span><span>Sep 30</span><span>Oct 1</span><span>Oct 2</span><span>Oct 3</span></div></div><div class="endpoints"><div class="endpoints-head"><span>Top endpoints</span><span>Requests</span></div><div class="endpoint-row"><span style="font-family:monospace;color:#9AA1B4;">/v1/completions</span><div class="endpoint-bar"></div><span style="font-weight:500;">84,216</span></div></div></body></html>`;
-
-    // Seed default views on initial startup if none saved
-    try {
-      if (localStorage.getItem(USER_VIEWS_KEY) === null && activeUserViews.length === 0) {
-        activeUserViews = [
-          {
-            id: 'default-editor',
-            kind: 'editor',
-            title: 'App.tsx',
-            filename: 'App.tsx',
-            language: 'typescript',
-            code: "import { MetricCard, UsageChart } from './components';\n\nconst metrics = [\n  { label: 'API requests', value: '128,430', change: '+12.8%' },\n  { label: 'Active users', value: '2,048', change: '+8.2%' },\n];\n\nexport default function UsageDashboard() {\n  return (\n    <main className=\"dashboard\">\n      <h1>Usage overview</h1>\n",
-          },
-          {
-            id: 'default-terminal',
-            kind: 'terminal',
-            title: 'Terminal',
-            cwd: '~/usage-dashboard',
-            prompt: '>',
-          },
-          {
-            id: 'default-preview',
-            kind: 'iframe',
-            title: 'Live preview',
-            url: 'http://localhost:5173',
-            srcdoc: DASHBOARD_SRCDOC,
-          },
-          {
-            id: 'default-handoff',
-            kind: 'handoff',
-            title: 'Builder',
-            agent: 'Builder',
-            summary: 'Dashboard built and verified. Added usage metrics, a 7-day request chart, and endpoint breakdown with responsive layouts.',
-          },
-        ];
-        saveUserViews(activeUserViews);
-      }
-    } catch (_e) {}
+    // Honest empty canvas on fresh load; no fabricated mock views seeded.
 
     // Restore saved user views on startup
     if (activeUserViews.length > 0) {
@@ -1117,10 +999,11 @@
     });
     document.getElementById('btn-run-again')?.addEventListener('click', () => {
       document.getElementById('btn-run-task')?.click();
-      showToast({ kind: 'info', title: 'Running Task', message: 'Executing workflow: Build a customer usage dashboard' });
+      const taskVal = document.getElementById('task-input')?.value?.trim();
+      showToast({ kind: 'info', title: 'Running Task', message: taskVal ? `Executing workflow: ${taskVal}` : 'Executing workflow' });
     });
     document.getElementById('btn-history')?.addEventListener('click', () => {
-      showToast({ kind: 'info', title: 'Task History', message: 'Showing last runs: 00:42 complete, 8/8 tests passed.' });
+      showToast({ kind: 'info', title: 'Task History', message: 'No previous runs in current session.' });
     });
     document.getElementById('btn-more-options')?.addEventListener('click', () => {
       showToast({ kind: 'info', title: 'Workspace Settings', message: 'Autosave: Enabled · Runtime: Local v1.0 · Split mode: 2' });
@@ -1166,22 +1049,102 @@
         openPalette();
       });
     });
-    // Sidebar item clicks activate stage views
-    document.querySelectorAll('.sidebar-resource-item').forEach((item) => {
-      item.addEventListener('click', () => {
-        document.querySelectorAll('.sidebar-resource-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
-        const viewKind = item.dataset.view;
-        if (viewKind) {
-          const matching = Array.from(stageEl.querySelectorAll('.stage-card')).find(c => c.dataset.kind === viewKind);
-          if (matching) {
-            matching.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            matching.classList.add('stage-card-focused');
-            setTimeout(() => matching.classList.remove('stage-card-focused'), 1000);
-          }
-        }
+    // Sidebar accordion sections show REAL registered resources. Nothing is
+    // seeded: an empty section stays empty and says so, and the count reflects
+    // what the API actually returned. The Figma mock's demo rows are gone.
+    const ACCORDION_EMPTY_TEXT = {
+      agents: 'No agents registered.',
+      tools: 'No tools registered.',
+      skills: 'No skills registered.',
+      knowledge: 'No knowledge items yet.',
+      artifacts: 'No artifacts yet.',
+    };
+
+    function setAccordionSection(section, items, emptyText) {
+      const countEl = section.querySelector('.sidebar-section-count');
+      const itemsEl = section.querySelector('.sidebar-section-items');
+      if (!itemsEl) return;
+      if (countEl) countEl.textContent = String(items.length);
+      if (items.length === 0) {
+        itemsEl.innerHTML = `<div class="sidebar-empty-note" style="padding:6px 10px 6px 24px;font-size:11px;color:var(--fg-muted);">${escapeHtml(emptyText)}</div>`;
+        return;
+      }
+      itemsEl.innerHTML = items
+        .map((it) => `
+          <div class="sidebar-resource-item" role="button" tabindex="0" data-res-type="${escapeHtml(it.type)}" data-res-key="${escapeHtml(it.key)}">
+            <span class="sidebar-item-icon">${it.icon}</span>
+            <span class="sidebar-item-name">${escapeHtml(it.name)}</span>
+            ${it.badge ? `<span class="sidebar-item-badge">${escapeHtml(it.badge)}</span>` : ''}
+          </div>
+        `)
+        .join('');
+      itemsEl.querySelectorAll('.sidebar-resource-item').forEach((el) => {
+        el.addEventListener('click', () => {
+          const type = el.getAttribute('data-res-type');
+          const key = el.getAttribute('data-res-key');
+          const data = items.find((it) => it.type === type && it.key === key)?.raw;
+          if (data) uiStore.setState({ selectedResource: { type, data } });
+        });
       });
-    });
+    }
+
+    async function loadAccordionSection(name) {
+      const section = document.querySelector(`.sidebar-resource-section[data-section="${name}"]`);
+      if (!section) return;
+      const emptyText = ACCORDION_EMPTY_TEXT[name] || 'Nothing here yet.';
+      try {
+        if (name === 'agents') {
+          const rows = await getAgents();
+          const list = (Array.isArray(rows) ? rows : []).map((a) => ({
+            type: 'agent', key: a.name, name: a.name, icon: '🤖',
+            badge: `${(a.capabilities || []).length} cap`, raw: a,
+          }));
+          setAccordionSection(section, list, emptyText);
+        } else if (name === 'tools') {
+          const rows = await getTools();
+          const list = (Array.isArray(rows) ? rows : []).map((t) => ({
+            type: 'tool', key: t.name, name: t.name, icon: '🔧',
+            badge: `T${t.risk_tier}`, raw: t,
+          }));
+          setAccordionSection(section, list, emptyText);
+        } else if (name === 'skills') {
+          const rows = await getSkills();
+          const list = (Array.isArray(rows) ? rows : []).map((s) => ({
+            type: 'skill', key: s.name, name: s.name, icon: '★',
+            badge: s.domain || '', raw: s,
+          }));
+          setAccordionSection(section, list, emptyText);
+        } else if (name === 'knowledge') {
+          const rows = await getKnowledge();
+          const list = (Array.isArray(rows) ? rows : []).map((k) => ({
+            type: 'knowledge', key: k.knowledge_id, name: k.statement, icon: '📄',
+            badge: k.domain || '', raw: k,
+          }));
+          setAccordionSection(section, list, emptyText);
+        } else if (name === 'artifacts') {
+          const eid = executionStore.getState().executionId;
+          if (!eid) {
+            setAccordionSection(section, [], 'No run selected.');
+            return;
+          }
+          const rows = await getTaskArtifacts(eid);
+          const list = (Array.isArray(rows) ? rows : []).map((a) => ({
+            type: 'artifact', key: String(a.index), name: (a.uri || '').split('/').pop() || `artifact #${a.index}`, icon: '📦',
+            badge: a.type || '', raw: { ...a, taskId: eid },
+          }));
+          setAccordionSection(section, list, emptyText);
+        }
+      } catch {
+        // Endpoint offline or empty: honest note, no fabricated rows.
+        setAccordionSection(section, [], emptyText);
+      }
+    }
+
+    async function loadAllAccordions() {
+      for (const name of ['agents', 'tools', 'skills', 'knowledge', 'artifacts']) {
+        await loadAccordionSection(name);
+      }
+    }
 
     // Resource search filter
     document.querySelector('.resource-search-input')?.addEventListener('input', (e) => {
@@ -1540,19 +1503,34 @@
           const activeId = uiStore.getState().activeWorkspaceId || workspaces[0].id;
           workspaceSelect.value = activeId;
           uiStore.setState({ activeWorkspaceId: activeId });
+          const activeWs = workspaces.find((w) => w.id === activeId) || workspaces[0];
+          const titleLabel = document.querySelector('.workspace-title-label');
+          if (titleLabel && activeWs) {
+            titleLabel.textContent = activeWs.name || 'Workspace';
+          }
         } else {
           workspaceSelect.innerHTML = '<option value="">UAP</option>';
           uiStore.setState({ workspaces: [], activeWorkspaceId: null });
+          const titleLabel = document.querySelector('.workspace-title-label');
+          if (titleLabel) titleLabel.textContent = 'Workspace';
         }
       } catch {
         // Honest empty/offline state when 404 or PG down
         workspaceSelect.innerHTML = '<option value="">UAP</option>';
         uiStore.setState({ workspaces: [], activeWorkspaceId: null });
+        const titleLabel = document.querySelector('.workspace-title-label');
+        if (titleLabel) titleLabel.textContent = 'Workspace';
       }
     }
 
     workspaceSelect?.addEventListener('change', (e) => {
-      uiStore.setState({ activeWorkspaceId: e.target.value || null });
+      const activeId = e.target.value || null;
+      uiStore.setState({ activeWorkspaceId: activeId });
+      const activeWs = (uiStore.getState().workspaces || []).find((w) => w.id === activeId);
+      const titleLabel = document.querySelector('.workspace-title-label');
+      if (titleLabel) {
+        titleLabel.textContent = activeWs ? activeWs.name : 'Workspace';
+      }
     });
 
     btnNewWorkspace?.addEventListener('click', () => {
@@ -2014,6 +1992,8 @@
       if (curNav === 'runs' || curNav === 'artifacts') {
         renderSidebarContent(curNav);
       }
+      // Artifacts accordion is scoped to the selected run: refresh it.
+      loadAccordionSection('artifacts');
     }
 
     // Clarification follow-up flow (§52)
@@ -2269,10 +2249,23 @@
       }
     });
 
+    // Environment badge reflects the REAL host the UI is served from, not the
+    // Figma mock's "Development". localhost/127.0.0.1 → Local; anything else
+    // → Remote (with the host shown on hover).
+    (function initEnvBadge() {
+      const badge = document.getElementById('env-badge');
+      if (!badge) return;
+      const host = window.location.hostname || '';
+      const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '';
+      badge.textContent = isLocal ? 'Local' : 'Remote';
+      badge.title = isLocal ? 'Served from a local host' : `Served from ${host}`;
+    })();
+
     // Initial render & bootstrapping
     (async () => {
       await loadWorkspaces();
       await renderSidebarContent('runs');
+      await loadAllAccordions();
       try {
         const tasks = await listTasks();
         if (tasks && tasks.length > 0) {

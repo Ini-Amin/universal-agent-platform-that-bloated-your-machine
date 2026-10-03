@@ -53,11 +53,12 @@ def test_ui_landmarks_present_in_index(client: TestClient) -> None:
 
     # Runtime Environment & Account Pill
     assert "Sandbox connected" in html
-    assert "Alex Kim" in html
-    assert "Pro workspace" in html
+    assert "account-pill" in html
+    assert "Operator" in html
 
     # Task Context Header
-    assert "Build a customer usage dashboard" in html
+    assert 'id="task-input"' in html
+    assert 'placeholder="What do you want to research?"' in html
     assert "btn-tools-palette" in html
     assert "btn-share-canvas" in html
 

@@ -462,10 +462,17 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   summary.className = 'stage-terminal-summary';
   const summaryLeft = document.createElement('span');
   summaryLeft.className = 'stage-terminal-summary-left';
-  summaryLeft.textContent = 'Process exited successfully';
   const summaryRight = document.createElement('span');
   summaryRight.className = 'stage-terminal-summary-right';
-  summaryRight.textContent = 'Exit code 0 · 42s · 6 tool calls';
+  // Only a real run reports a result. With no run, the summary is hidden
+  // rather than showing the Figma mock's fabricated "Exit code 0 · 42s".
+  const hasSummary = Boolean(spec.summaryLeft || spec.summaryRight);
+  if (hasSummary) {
+    summaryLeft.textContent = spec.summaryLeft || '';
+    summaryRight.textContent = spec.summaryRight || '';
+  } else {
+    summary.style.display = 'none';
+  }
   summary.appendChild(summaryLeft);
   summary.appendChild(summaryRight);
 
@@ -485,7 +492,7 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
       toolbar.style.display = 'flex';
       inputForm.style.display = 'none';
       problemsView.style.display = 'none';
-      summary.style.display = 'flex';
+      summary.style.display = hasSummary ? 'flex' : 'none';
     } else if (name === 'problems') {
       buffer.style.display = 'none';
       toolbar.style.display = 'none';
@@ -528,9 +535,9 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
       if (cmd === 'clear') {
         clearBuffer();
       } else if (cmd === 'pwd') {
-        appendOutput(`${spec.cwd || '~/usage-dashboard'}\n`);
+        appendOutput(`${spec.cwd || '~'}\n`);
       } else if (cmd === 'ls') {
-        appendOutput('App.tsx  UsageChart.tsx  components/  package.json  styles.css\n');
+        appendOutput('\n');
       } else if (cmd.startsWith('echo ')) {
         appendOutput(`${cmd.slice(5)}\n`);
       } else {
@@ -565,15 +572,7 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
     clearBuffer();
   });
 
-  const DEFAULT_TERMINAL_LOG = [
-    '14:32:08 builder Scaffolded React + TypeScript project',
-    '14:32:12 files   Created App.tsx, UsageChart.tsx, styles.css',
-    '14:32:18 shell   npm run build && npm run test',
-    '14:32:24 vite    Build complete · 42 modules · 1.24s',
-    '14:32:31 vitest  8 tests passed (8) · 0 failures',
-    '14:32:50 browser Preview ready at http://localhost:5173',
-    '> ~/usage-dashboard █'
-  ].join('\n');
+  const DEFAULT_TERMINAL_LOG = '';
   const initialLog = spec.initialText !== undefined ? spec.initialText : DEFAULT_TERMINAL_LOG;
   if (initialLog) {
     appendOutput(initialLog.endsWith('\n') ? initialLog : initialLog + '\n');
@@ -2472,7 +2471,7 @@ export function createStage(containerEl, options = {}) {
       }
 
       case 'iframe': {
-        if (!spec.url) return missing(body, 'iframe', '`url`');
+        const url = (spec.url || '').trim();
         const controls = document.createElement('div');
         controls.className = 'stage-browser-controls';
 
@@ -2497,7 +2496,7 @@ export function createStage(containerEl, options = {}) {
 
         const urlText = document.createElement('span');
         urlText.className = 'stage-browser-url-text';
-        urlText.textContent = spec.url;
+        urlText.textContent = url || 'about:blank';
 
         addressBar.appendChild(lockIcon);
         addressBar.appendChild(urlText);
@@ -2508,9 +2507,11 @@ export function createStage(containerEl, options = {}) {
         btnCopy.title = 'Copy URL';
         btnCopy.textContent = 'Copy';
         btnCopy.addEventListener('click', async () => {
-          await copyText(spec.url);
-          btnCopy.textContent = 'Copied';
-          setTimeout(() => { btnCopy.textContent = 'Copy'; }, 1500);
+          if (url) {
+            await copyText(url);
+            btnCopy.textContent = 'Copied';
+            setTimeout(() => { btnCopy.textContent = 'Copy'; }, 1500);
+          }
         });
 
         controls.appendChild(btnBack);
@@ -2518,12 +2519,22 @@ export function createStage(containerEl, options = {}) {
         controls.appendChild(addressBar);
         controls.appendChild(btnCopy);
 
+        if (!url && !spec.srcdoc) {
+          const emptyEl = document.createElement('div');
+          emptyEl.className = 'stage-browser-empty-state';
+          emptyEl.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;height:calc(100% - 38px);color:var(--fg-muted,#9AA1B4);font-size:12px;gap:8px;padding:24px;text-align:center;';
+          emptyEl.innerHTML = '<span style="font-size:24px;">🌐</span><span>Nothing loaded</span><span style="font-size:11px;color:var(--sds-color-text-subtle,#7E869E);">Enter a URL or launch a preview from a workflow run.</span>';
+          body.appendChild(controls);
+          body.appendChild(emptyEl);
+          return body;
+        }
+
         const frame = document.createElement('iframe');
         frame.className = 'stage-iframe';
         if (spec.srcdoc) {
           frame.srcdoc = spec.srcdoc;
         } else {
-          frame.src = spec.url;
+          frame.src = url;
         }
         frame.title = spec.title || 'Embedded view';
         frame.setAttribute('loading', 'lazy');
@@ -2540,7 +2551,7 @@ export function createStage(containerEl, options = {}) {
         if (spec.allow) frame.setAttribute('allow', spec.allow);
 
         btnReload.addEventListener('click', () => {
-          try { frame.src = spec.url; } catch (_e) {}
+          if (url) { try { frame.src = url; } catch (_e) {} }
         });
 
         body.appendChild(controls);
@@ -2566,15 +2577,16 @@ export function createStage(containerEl, options = {}) {
               <path d="M5 11C5.5 11.5 6.5 12 8 12C9.5 12 10.5 11.5 11 11" stroke="#C8CDDB" stroke-width="1.2" stroke-linecap="round"/>
             </svg>
           </div>
-          <span style="font-weight: 600; color: #E2E6F0; font-size: 13px;">${escapeHtml(spec.agent || 'Builder')}</span>
+          <span style="font-weight: 600; color: #E2E6F0; font-size: 13px;">${escapeHtml(spec.agent || 'Agent')}</span>
           <span style="color: var(--fg-muted); font-size: 11px;">just now</span>
         `;
 
         const status = document.createElement('div');
         status.className = 'stage-handoff-status';
+        const statusText = spec.statusText || (spec.status ? String(spec.status) : 'Active');
         status.innerHTML = `
           <span class="status-dot"></span>
-          <span style="font-size: 12px; color: var(--ok); font-weight: 500;">8 / 8 tests passed</span>
+          <span style="font-size: 12px; color: var(--ok); font-weight: 500;">${escapeHtml(statusText)}</span>
         `;
 
         heading.appendChild(identity);
@@ -2582,8 +2594,7 @@ export function createStage(containerEl, options = {}) {
 
         const summary = document.createElement('div');
         summary.className = 'stage-handoff-summary';
-        summary.textContent = spec.summary || 'Dashboard built and verified. Added usage metrics, a 7-day request chart, and endpoint breakdown with responsive layouts.';
-
+        summary.textContent = spec.summary || 'No summary provided.';
         const changeLabel = document.createElement('div');
         changeLabel.className = 'stage-handoff-change-label';
         changeLabel.textContent = 'Request a change';
@@ -2596,7 +2607,7 @@ export function createStage(containerEl, options = {}) {
               <path d="M7 2V12M2 7H12" stroke="#9AA1B4" stroke-width="1.6" stroke-linecap="round"/>
             </svg>
           </button>
-          <input type="text" class="stage-handoff-input" placeholder="Ask Builder to make a change..." aria-label="Ask Builder to make a change" />
+          <input type="text" class="stage-handoff-input" placeholder="Ask agent to make a change..." aria-label="Ask agent to make a change" />
           <span class="stage-handoff-kbd font-mono">⌘ ↵</span>
           <button type="submit" class="stage-handoff-send" title="Send request" aria-label="Send request">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
