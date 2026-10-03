@@ -49,7 +49,10 @@ body {
   width: 240px;
   min-width: 240px;
   max-width: 240px;
-  height: 1024px;
+  /* Was a hard-coded 1024px, so on a shorter viewport (1916x933) the bottom
+     91px — runtime environment + account pill — was clipped away entirely.
+     The sidebar is a full-height flex column: track the viewport. */
+  height: 100%;
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
@@ -60,7 +63,7 @@ body {
 }
 
 .sidebar-identity {
-  width: 240px;
+  width: 100%;
   height: 72px;
   min-height: 72px;
   max-height: 72px;
@@ -135,8 +138,11 @@ body {
 }
 
 .sidebar-resources {
-  width: 240px;
-  height: 860px;
+  width: 100%;
+  /* Was 860px + flex:1: the fixed height fought the flex track and the children
+     below were sized 240px inside a 216px content box (see .sidebar-spacer /
+     .runtime-environment), which produced a 24px horizontal overflow and the
+     scrollbar the owner saw. Fill the column, never scroll sideways. */
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -145,6 +151,7 @@ body {
   box-sizing: border-box;
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .resource-search-wrap {
@@ -184,7 +191,7 @@ body {
 }
 
 .sidebar-spacer {
-  width: 240px;
+  width: 100%;
   height: 1px;
   min-height: 1px;
   background: var(--panel-2);
@@ -194,7 +201,7 @@ body {
 }
 
 .runtime-environment {
-  width: 240px;
+  width: 100%;
   height: 91px;
   min-height: 91px;
   max-height: 91px;
@@ -210,7 +217,7 @@ body {
 }
 
 .env-status-row {
-  width: 208px;
+  width: 100%;
   height: 14px;
   display: flex;
   align-items: center;
@@ -232,6 +239,24 @@ body {
   flex-shrink: 0;
   display: inline-block;
 }
+
+/* The run-status dot used to be hard-coded --ok (teal) no matter the state, so
+   a failed or idle run still showed a green light. Drive it from the run status
+   so colour carries the same meaning as the badge text (index.html sets
+   `status-dot-<state>` on it from the execution store). Scoped to the toolbar
+   indicator so the environment and handoff dots stay their own signal. */
+.run-status-indicator .status-dot { background: var(--fg-muted); }
+.run-status-indicator .status-dot.status-dot-running { background: var(--accent); }
+.run-status-indicator .status-dot.status-dot-completed { background: var(--ok); }
+.run-status-indicator .status-dot.status-dot-failed { background: var(--err); }
+.run-status-indicator .status-dot.status-dot-paused { background: var(--warn); }
+.run-status-indicator .status-dot.status-dot-idle,
+.run-status-indicator .status-dot.status-dot-pending,
+.run-status-indicator .status-dot.status-dot-skipped,
+.run-status-indicator .status-dot.status-dot-closed { background: var(--fg-muted); }
+.run-status-indicator .status-dot.status-dot-connecting,
+.run-status-indicator .status-dot.status-dot-open { background: var(--accent); }
+.run-status-indicator .status-dot.status-dot-reconnecting { background: var(--warn); }
 
 .status-label {
   font-family: var(--font-sans);
@@ -260,7 +285,7 @@ body {
   color: var(--fg);
 }
 .account-pill {
-  width: 208px;
+  width: 100%;
   height: 32px;
   min-height: 32px;
   max-height: 32px;
@@ -1065,6 +1090,10 @@ button:disabled {
   font-size: 11px;
   font-family: var(--font-mono);
   border: 1px solid var(--border);
+  /* A pill needs a surface: without one the idle badge was just grey text with
+     a hairline border on the toolbar background and read as stray copy. */
+  background: var(--panel-2);
+  line-height: 1.4;
 }
 
 .badge-running { color: var(--accent); border-color: var(--accent); }
@@ -1339,8 +1368,12 @@ input[type="text"].input-error {
 .sidebar-nav-container {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  overflow: hidden;
+  /* Was height:100% + overflow:hidden: with 16 tools the sections total ~901px
+     in a 783px box, so Artifacts and part of Knowledge were clipped away and
+     unreachable. Let the container size to its content; .sidebar-resources owns
+     the vertical scroll. */
+  overflow: visible;
+  min-height: 0;
 }
 .sidebar-nav-menu {
   border-bottom: 1px solid var(--border);
@@ -1681,16 +1714,21 @@ textarea:focus-visible,
   flex-direction: column;
   gap: 6px;
   padding: 8px 6px;
+  min-height: 100%;
 }
 
 .node-strip-empty {
+  /* Fill the strip and centre, so the empty state reads as a deliberate label
+     instead of a three-line fragment pinned to the top-left of a tall column. */
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 11px;
   text-align: center;
-  padding: 14px 6px;
+  padding: 8px 4px;
   line-height: 1.4;
-  /* The 84px strip wraps this to a few short lines; keep it readable rather
-     than rotated or clipped. */
   overflow-wrap: break-word;
 }
 
@@ -1744,6 +1782,13 @@ textarea:focus-visible,
   color: var(--fg-muted);
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  /* Kinds like EVALUATION are wider than the 84px strip's chip, so they spilled
+     past the chip's right edge and were clipped by the strip. Ellipsis them
+     (the full kind is still on the chip's title attribute). */
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Collapsed strip: zero width, and the left-edge handle becomes the way back. */
@@ -4183,6 +4228,8 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 10px;
+  line-height: 1;
   color: #FFFFFF;
   transition: transform 0.15s ease;
 }
@@ -4194,12 +4241,14 @@ textarea:focus-visible,
 }
 
 .sidebar-section-icon {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 12px;
+  line-height: 1;
   color: #FFFFFF;
 }
 
@@ -4239,6 +4288,21 @@ textarea:focus-visible,
   background: var(--panel-2);
 }
 
+/* The labelled Dedupe action is not a 24x24 icon: a fixed 24px box clipped its
+   own label to "Dedup" (scrollWidth 37 vs clientWidth 24) and pushed the header
+   to scrollWidth 222 inside a 216px cell — part of the sidebar's horizontal
+   overflow. Size it to its text. */
+.sidebar-section-dedupe {
+  width: auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .sidebar-section-items {
   display: flex;
   flex-direction: column;
@@ -4273,13 +4337,18 @@ textarea:focus-visible,
   border-color: rgba(221, 127, 211, 0.4);
 }
 
+/* Emoji glyphs render ~16px tall at a 13px font size, so a 14x14 box clipped
+   them top and bottom (measured: box 14x14, glyph 16x16). Give the icon cells
+   room for the glyph and stop the line box from adding half-leading. */
 .sidebar-item-icon {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 12px;
+  line-height: 1;
   color: var(--fg-muted);
 }
 .sidebar-resource-item.active .sidebar-item-icon {

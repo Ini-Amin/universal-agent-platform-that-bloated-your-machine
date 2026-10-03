@@ -1460,11 +1460,25 @@ export function createStage(containerEl, options = {}) {
     };
   }
 
-  // Hide the "Empty — …" hint for a region once it holds at least one card.
+  // [StageGuide] The guide is the ONE empty-canvas call to action. A region
+  // hint ("Empty — add a surface, or drop a card here.") is the fallback used
+  // only while the guide is hidden. Showing both at once put the hints UNDER
+  // the centred guide (measured: hint boxes 348,212 602x788 and 974,212
+  // 602x788 vs guide 682,371 560x470), so their centred text bled out on both
+  // sides of the guide card. `guideElVisible()` lets the emptiness logic know
+  // the guide owns the canvas right now.
+  function guideElVisible() {
+    return Boolean(guideEl && guideEl.style.display !== 'none' && views.size === 0 && !guideDismissed() && !guideSuppressed);
+  }
+
+  // Hide the "Empty — …" hint for a region once it holds at least one card, and
+  // while the empty-canvas guide is on screen (the guide is the single empty
+  // state; a hint must never render underneath it).
   function refreshRegionEmptiness() {
+    const guideOwns = guideElVisible();
     for (let r = 0; r < regionEls.length; r += 1) {
       const hint = regionEls[r].querySelector('.stage-region-empty');
-      if (hint) hint.style.display = countCardsInRegion(r) === 0 ? 'flex' : 'none';
+      if (hint) hint.style.display = (!guideOwns && countCardsInRegion(r) === 0) ? 'flex' : 'none';
     }
   }
 
@@ -1738,6 +1752,8 @@ export function createStage(containerEl, options = {}) {
     if (guideEl) {
       guideEl.style.display = views.size === 0 && !guideDismissed() && !guideSuppressed ? 'flex' : 'none';
     }
+    // Refresh AFTER the guide's display is set: the region hints hide while the
+    // guide owns the canvas (see refreshRegionEmptiness / guideElVisible).
     refreshRegionEmptiness();
   }
 
@@ -1749,11 +1765,14 @@ export function createStage(containerEl, options = {}) {
   guideEl.querySelector('.stage-guide-close')?.addEventListener('click', (e) => {
     e.stopPropagation();
     guideEl.style.display = 'none';
+    // The region hints are the empty state while the guide is hidden.
+    refreshRegionEmptiness();
   });
   guideEl.querySelector('.stage-guide-dismiss')?.addEventListener('click', (e) => {
     e.stopPropagation();
     setStorage(GUIDE_DISMISS_KEY, '1');
     guideEl.style.display = 'none';
+    refreshRegionEmptiness();
   });
 
 
