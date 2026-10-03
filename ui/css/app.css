@@ -342,17 +342,59 @@ body {
 }
 
 /* Operator Workspace */
+/* Toolbar on top, canvas and output pane side by side, event console below.
+   These were stacked in a flex column inside a scrolling box, so the output
+   pane (and with it every run's result) rendered below the fold, and the
+   hard-coded `calc(100vw - 240px)` width left a dead 240px strip when the
+   sidebar was collapsed. The grid gives each pane its own track instead. */
 .operator-workspace {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "toolbar toolbar"
+    "canvas  output"
+    "console console";
+  flex: 1 1 0;
   min-width: 0;
-  width: calc(100vw - 240px);
-  max-width: calc(100vw - 240px);
   height: 100vh;
   background: var(--bg);
-  overflow: auto;
+  overflow: hidden;
   box-sizing: border-box;
+}
+.operator-workspace > .workspace-toolbar { grid-area: toolbar; }
+.operator-workspace > .pane-canvas { grid-area: canvas; min-height: 0; }
+.operator-workspace > .pane-inspector { grid-area: output; min-height: 0; }
+.operator-workspace > .pane-console { grid-area: console; }
+
+/* Output / event-console toggles in the toolbar. Pressed means "shown". */
+.btn-panel-toggle {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-panel-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--panel-3);
+}
+/* A run finished while the output pane was closed. */
+.btn-panel-toggle.has-update::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.panel-toggles {
+  display: flex;
+  gap: 6px;
 }
 
 /* Workspace Toolbar (72px) */

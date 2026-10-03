@@ -157,3 +157,33 @@ def test_stale_execution_responses_cannot_replace_the_selected_run(client: TestC
     assert "if (!isCurrentSelection()) return;" in html
     assert "executionStore.getState().executionId === state.executionId" in html
 
+
+def _css_rule(css: str, selector: str) -> str:
+    start = css.index(f"{selector} {{")
+    return css[start : css.index("}", start)]
+
+
+def test_output_pane_sits_beside_the_canvas_not_below_it(client: TestClient) -> None:
+    css = client.get("/css/app.css").text
+    rule = _css_rule(css, ".operator-workspace")
+    # A flex column stacked the output pane and event console below the fold,
+    # and a hard-coded width left a dead strip when the sidebar collapsed.
+    assert "display: grid;" in rule
+    assert "100vw - 240px" not in rule
+    assert '"canvas  output"' in rule
+    assert "grid-area: output" in css
+    assert "grid-area: console" in css
+
+
+def test_output_and_event_console_have_visible_toggles(client: TestClient) -> None:
+    html = client.get("/").text
+    # The old controls lived in a display:none block, so Ctrl+I was the only way in.
+    assert 'id="btn-toggle-output"' in html
+    assert 'id="btn-toggle-events"' in html
+    assert "revealOutput()" in html
+    assert "setConsoleOpen" in html
+    # The console toggle flipped `collapsed` while the pane is hidden by
+    # `pane-collapsed`, so it could never open.
+    assert "consolePane.classList.toggle('collapsed')" not in html
+    assert "key.toLowerCase() === 'j'" in html
+
