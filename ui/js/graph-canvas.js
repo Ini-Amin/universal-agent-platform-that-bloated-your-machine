@@ -5,36 +5,36 @@
 import { canvasStore, executionStore, uiStore } from './state.js';
 
 export const NODE_KINDS = {
-  input: { label: 'Input', color: '#58a6ff' },
-  output: { label: 'Output', color: '#3fb950' },
+  input: { label: 'Input', color: '#dd7fd3' },
+  output: { label: 'Output', color: '#6fc2b8' },
   agent: { label: 'Agent', color: '#bc8cff' },
   tool: { label: 'Tool', color: '#f0883e' },
   condition: { label: 'Condition', color: '#d29922' },
-  parallel: { label: 'Parallel', color: '#39c5bb' },
-  join: { label: 'Join', color: '#56d364' },
+  parallel: { label: 'Parallel', color: '#6fc2b8' },
+  join: { label: 'Join', color: '#6fc2b8' },
   subworkflow: { label: 'Subworkflow', color: '#a371f7' },
-  synthesis: { label: 'Synthesis', color: '#f778ba' },
-  approval: { label: 'Approval', color: '#e3b341' },
-  knowledge: { label: 'Knowledge', color: '#79c0ff' },
-  evaluation: { label: 'Evaluation', color: '#db61a2' },
+  synthesis: { label: 'Synthesis', color: '#dd7fd3' },
+  approval: { label: 'Approval', color: '#d29922' },
+  knowledge: { label: 'Knowledge', color: '#dd7fd3' },
+  evaluation: { label: 'Evaluation', color: '#dd7fd3' },
 };
 
 export const PORT_COLORS = {
-  any: '#8b949e',
-  text: '#58a6ff',
+  any: '#9aa1b4',
+  text: '#dd7fd3',
   json: '#f0883e',
-  evidence: '#39c5bb',
-  artifact: '#3fb950',
+  evidence: '#6fc2b8',
+  artifact: '#6fc2b8',
   control: '#bc8cff',
 };
 
 const STATUS_COLORS = {
-  running: '#58a6ff',
-  completed: '#3fb950',
+  running: '#dd7fd3',
+  completed: '#6fc2b8',
   failed: '#f85149',
   paused: '#d29922',
-  pending: '#8b949e',
-  skipped: '#6e7681',
+  pending: '#9aa1b4',
+  skipped: '#9aa1b4',
 };
 
 const NODE_WIDTH = 190;
@@ -63,10 +63,10 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
     <svg class="canvas-svg" width="100%" height="100%">
       <defs>
         <marker id="arrow-default" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 1 L 10 5 L 0 9 z" fill="#6e7681" />
+          <path d="M 0 1 L 10 5 L 0 9 z" fill="#9aa1b4" />
         </marker>
         <marker id="arrow-selected" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 1 L 10 5 L 0 9 z" fill="#58a6ff" />
+          <path d="M 0 1 L 10 5 L 0 9 z" fill="#dd7fd3" />
         </marker>
       </defs>
       <g class="canvas-bg">
@@ -171,7 +171,7 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
       const d = `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`;
 
       const isSelected = (canvasState.selectedEdgeIds || []).includes(edge.id);
-      const strokeColor = isSelected ? '#58a6ff' : '#6e7681';
+      const strokeColor = isSelected ? 'var(--accent)' : 'var(--border)';
       const marker = isSelected ? 'url(#arrow-selected)' : 'url(#arrow-default)';
 
       edgesSvg += `
@@ -187,7 +187,7 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
     graph.nodes.forEach((node, idx) => {
       const pos = getNodePos(node, idx);
       const height = getNodeHeight(node);
-      const kindInfo = NODE_KINDS[node.kind] || { label: node.kind, color: '#8b949e' };
+      const kindInfo = NODE_KINDS[node.kind] || { label: node.kind, color: '#9aa1b4' };
       const isSelected = (canvasState.selectedNodeIds || []).includes(node.id);
       const nodeStatus = execState.activeNodes[node.id] || node.status || (execState.executionId && execState.status === 'running' ? 'pending' : null);
 
@@ -202,7 +202,7 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
                 fill="none" stroke="${ringColor}" stroke-width="2.5" class="status-ring status-${nodeStatus} ${isRunning ? 'pulse' : ''}" />
         `;
         statusBadgeSvg = `
-          <rect x="${NODE_WIDTH - 64}" y="6" width="56" height="16" rx="3" ry="3" fill="#0d1117" stroke="${ringColor}" stroke-width="1" />
+          <rect x="${NODE_WIDTH - 64}" y="6" width="56" height="16" rx="3" ry="3" fill="var(--bg)" stroke="${ringColor}" stroke-width="1" />
           <text x="${NODE_WIDTH - 36}" y="17" fill="${ringColor}" font-size="9" font-family="monospace" font-weight="600" text-anchor="middle">${nodeStatus}</text>
         `;
       }
@@ -215,8 +215,8 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
           const pColor = PORT_COLORS[p.type] || PORT_COLORS.any;
           return `
           <g class="port port-input" data-port="${escapeHtml(p.name)}">
-            <circle cx="0" cy="${py}" r="5" fill="${pColor}" stroke="#161b22" stroke-width="2" />
-            <text x="10" y="${py + 4}" fill="#8b949e" font-size="10" font-family="monospace">${escapeHtml(p.name)}</text>
+            <circle cx="0" cy="${py}" r="5" fill="${pColor}" stroke="var(--panel)" stroke-width="2" />
+            <text x="10" y="${py + 4}" fill="var(--fg-muted)" font-size="10" font-family="monospace">${escapeHtml(p.name)}</text>
           </g>
         `;
         })
@@ -230,8 +230,8 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
           const pColor = PORT_COLORS[p.type] || PORT_COLORS.any;
           return `
           <g class="port port-output" data-port="${escapeHtml(p.name)}">
-            <circle cx="${NODE_WIDTH}" cy="${py}" r="5" fill="${pColor}" stroke="#161b22" stroke-width="2" />
-            <text x="${NODE_WIDTH - 10}" y="${py + 4}" fill="#8b949e" font-size="10" font-family="monospace" text-anchor="end">${escapeHtml(p.name)}</text>
+            <circle cx="${NODE_WIDTH}" cy="${py}" r="5" fill="${pColor}" stroke="var(--panel)" stroke-width="2" />
+            <text x="${NODE_WIDTH - 10}" y="${py + 4}" fill="var(--fg-muted)" font-size="10" font-family="monospace" text-anchor="end">${escapeHtml(p.name)}</text>
           </g>
         `;
         })
@@ -244,12 +244,12 @@ export function initGraphCanvas(containerEl, { onNodeMoved = null } = {}) {
         <g class="graph-node ${isSelected ? 'selected' : ''}" data-node-id="${node.id}" transform="translate(${pos.x}, ${pos.y})">
           ${statusRing}
           <!-- Node background -->
-          <rect width="${NODE_WIDTH}" height="${height}" rx="6" ry="6" fill="#161b22" stroke="${isSelected ? '#58a6ff' : '#30363d'}" stroke-width="${isSelected ? 2 : 1}" />
+          <rect width="${NODE_WIDTH}" height="${height}" rx="8" ry="8" fill="var(--panel)" stroke="${isSelected ? 'var(--accent)' : 'var(--border)'}" stroke-width="${isSelected ? 2 : 1}" />
           <!-- Kind header banner -->
-          <rect width="${NODE_WIDTH}" height="${HEADER_HEIGHT}" rx="6" ry="6" fill="#1c2330" />
+          <rect width="${NODE_WIDTH}" height="${HEADER_HEIGHT}" rx="8" ry="8" fill="var(--panel-2)" />
           <rect y="${HEADER_HEIGHT - 3}" width="${NODE_WIDTH}" height="3" fill="${kindInfo.color}" />
           <!-- Header text -->
-          <text x="10" y="18" fill="#e6edf3" font-size="12" font-weight="600">${displayTitle}</text>
+          <text x="10" y="18" fill="var(--fg)" font-size="12" font-weight="600">${displayTitle}</text>
           ${statusBadgeSvg ? statusBadgeSvg : `<text x="${NODE_WIDTH - 10}" y="18" fill="${kindInfo.color}" font-size="10" font-family="monospace" text-anchor="end">${kindInfo.label}</text>`}
           ${inputDots}
           ${outputDots}

@@ -1,96 +1,78 @@
-# UAP Design Tokens — from Figma AI generation
+# UAP Design Tokens — SDS Dark (Figma AI generation)
 
-Generated 2026-10-03 by Figma AI (using owner's AI credits via browser relay).
-File: `luXdGtltH2zNc6IYZE7JOs` (frame "Universal Agent Platform", 1600×1000).
-Full CSS export: 8715 lines captured to `figma-export.css` (see session paste).
+Generated 2026-10-03 by Figma AI ("Universal Agent Platform · SDS Dark", 1600×1024).
+Full CSS export: 8457 lines captured from Figma AI export (see `paste-2.md`).
 
-## Color palette (by frequency)
-```
-#64748B  muted gray (icons, secondary text)     x83
-#94A1B5  mid gray (icon strokes)                x71
-#E8EDF5  primary text                           x37
-#7A879A  dim text                               x22
-#283242  border line                            x19
-#79C6A1  success/run green                      x13
-#4F8CFF  accent blue (matches existing UAP)     x11
-#1C293C  panel surface                          x10
-#141B25  toolbar surface                        x10
-#FFFFFF  pure white                             x9
-#0D1117  app background (matches existing UAP)  x9
-#E4E9F1  light text                             x8
-#10151D  sidebar surface                        x5
-#B8A4DD  purple accent                          x3
-#1A2330  card surface                           x3
-#1B2D4D  brand mark / active section            x2
-#39816B  dark green (run button text)           x2
-```
+## Color Palette
+
+| Token | Hex | Role / Usage |
+|---|---|---|
+| `--bg` | `#1B1E28` | Main application background, canvas background, editor & terminal buffer |
+| `--panel` | `#1E222C` | Sidebar surface, top header bar, stage card surface |
+| `--panel-2` | `#212530` | Platform identity bar, card toolbar, secondary panels, tab active state |
+| `--panel-3` | `#262B36` | Input field surface, dropdown backgrounds, button neutral fill |
+| `--border` | `#2A2F3B` | Primary border line for cards, panes, dividers, inputs |
+| `--border-light` | `#2F3542` | Subtle borders, hover borders |
+| `--fg` | `#E2E6F0` | Primary text, active icons, code text |
+| `--fg-muted` | `#9AA1B4` | Muted secondary text, line numbers, inactive tab labels |
+| `--accent` | `#DD7FD3` | Brand/accent pink, active highlights, links, focus rings |
+| `--accent-muted` | `#A8499E` | Derived dark pink for filled buttons with white text (WCAG 5.11:1) |
+| `--ok` | `#6FC2B8` | Success/teal, status connected, completed run indicator |
+| `--warn` | `#D29922` | Warning/amber, paused state, caution badges |
+| `--err` | `#F85149` | Error/red, failed status, destructive actions |
+| Chip bg | `#2B2039` | Dark purple background for tool chips and badges |
+| Icon stroke | `#C8CDDB` | Neutral icon strokes across toolbar and sidebar |
 
 ## Fonts
-- `Inter` — all UI text (107 uses)
-- `JetBrains Mono` — code/terminal (59 uses)
 
-## Layout structure (top-level)
+- **UI Font (`--font-sans`)**: `Inter`, system-ui, -apple-system, "Segoe UI", sans-serif
+- **Code/Terminal Font (`--font-mono`)**: `Roboto Mono`, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace
+
+Loaded via Google Fonts in `<head>` of `ui/index.html`.
+
+## Border Radii
+
+- **Cards / Containers**: `8px` (code editor, terminal, web preview, modal dialogs)
+- **Controls / Inputs**: `6px` (buttons, text inputs, search fields, layout buttons)
+- **Badges / Small tags**: `4px` (engine badge, line number gutter tags)
+- **Pills / Status dots**: `10px`–`12px` (round counter badges)
+
+## Shadows
+
+- **Card standard**: `0 4px 12px rgba(0, 0, 0, 0.125)`
+- **Card focused**: `0 6px 24px rgba(0, 0, 0, 0.45)`
+- **Popover / Modal**: `0 16px 40px rgba(0, 0, 0, 0.65)`
+
+## Layout Structure & Landmarks
+
 ```
-root: 1600×1000, flex-row, bg #0D1117
-├── Resource sidebar: 240×1000, flex-column, bg #10151D, border-right #283242
-│   ├── Platform identity: 240×72, flex-row, border-bottom #283242
-│   │   ├── Brand mark: 30×30, bg #1B2D4D, border #4F8CFF, radius 8
-│   │   ├── Platform name: 82×30, flex-column, gap 2
-│   │   └── Sidebar control: 68×16 (panel-left-close icon)
-│   └── Resources: 240×850, flex-column, padding 20 12 0, gap 16
-│       ├── Resource search: 216×34, bg #0D1117, border #283242, radius 6
-│       ├── Resource section (Agents): 216×151, bg #1B2D4D, radius 6
-│       │   section toggle (chevron + bot icon + label + count + plus)
-│       │   resource rows: bot icon + name + running indicator
-│       ├── Resource section (Tools): wrench icon
-│       ├── Resource section (Skills): chevron-right + sparkles
-│       ├── Resource section (Knowledge): book-open
-│       ├── Resource section (Artifacts): box icon
-│       └── Resource section (MCP / Integrations)
+Root: 1600×1000, flex-row, bg #1B1E28
+├── Resource sidebar: 240×1000, flex-column, bg #1E222C, border-right #2A2F3B
+│   ├── Platform identity: 240×72, flex-row, bg #212530, border-bottom #2A2F3B
+│   └── Resources: 240×850, flex-column, gap 16
+│       ├── Navigation: Canvas, Runs
+│       ├── Library: Agents, Tools, Skills, Knowledge, Artifacts
+│       └── System: Models, MCP, Integrations, Policies
 └── Operator workspace: 1360×1000, flex-column
-    ├── Workspace toolbar: 1360×72, bg #10151D
-    │   ├── Workspace navigation
-    │   ├── Workspace selector: 74×16, bg #283242, radius 6
-    │   └── Run controls: 419×34, bg #79C6A1, radius 8
-    └── Infinite canvas: 1360×928
-        ├── Canvas context and controls: 1360×928 (overlay)
-        ├── Canvas hint
-        ├── Canvas navigation
-        ├── Canvas breadcrumb: 162×12
-        ├── Canvas actions: 203×34, bg #141B25, radius 8
-        ├── Canvas grid
-        ├── Code editor: 650×426, bg #0D1117, radius 12
-        │   ├── Surface toolbar: tabs
-        │   ├── Editor tabs: 650×34, bg #10151D
-        │   └── Editor status
-        ├── Terminal: 650×272, bg #0D1117, radius 12
-        │   ├── Surface toolbar
-        │   └── Terminal tabs (active tab)
-        └── Web preview: 614×718, bg #0D1117, radius 12
+    ├── Workspace toolbar: 1360×72, bg #1E222C, border-bottom #2A2F3B
+    │   ├── Workspace picker & New Workspace button
+    │   ├── Task input & run controls
+    │   └── Stream & task status badges
+    └── Infinite canvas: 1360×928, bg #1B1E28
+        ├── Canvas actions: Zoom (+/-), Fit, Reset, Layout (Free, Split 2, Split 4), + Tools
+        ├── Code editor card: 8px radius, bg #1B1E28, border #2A2F3B, shadow 0 4px 12px
+        ├── Terminal card: 8px radius, bg #1B1E28, border #2A2F3B, shadow 0 4px 12px
+        └── Web preview card: 8px radius, bg #1B1E28, border #2A2F3B, shadow 0 4px 12px
 ```
 
-## Key dimensions
+## Key Dimensions
+
 | Component | Width | Height | Radius |
 |---|---|---|---|
-| Root | 1600 | 1000 | — |
-| Sidebar | 240 | 1000 | — |
-| Sidebar identity bar | 240 | 72 | — |
-| Workspace toolbar | 1360 | 72 | — |
-| Canvas | 1360 | 928 | — |
-| Code editor card | 650 | 426 | 12 |
-| Terminal card | 650 | 272 | 12 |
-| Web preview card | 614 | 718 | 12 |
-| Resource section | 216 | 151 | 6 |
-| Resource search | 216 | 34 | 6 |
-| Brand mark | 30 | 30 | 8 |
-| Canvas actions | 203 | 34 | 8 |
-| Run button | 419 | 34 | 8 |
-
-## Notes
-- The design confirms UAP's existing palette (#0D1117 bg, #4F8CFF accent).
-- Adds: #10151D sidebar surface, #283242 borders, #1B2D4D active section,
-  #79C6A1 success green, #141B25 toolbar, #64748B/#94A1B5 icon grays.
-- Card radius is 12px (UAP currently uses 10px — minor bump).
-- Inter font everywhere, JetBrains Mono for code.
-- The sidebar has collapsible resource sections with chevron toggles,
-  resource counts, and add (+) buttons — richer than UAP's current sidebar.
+| Root Viewport | 1600 | 1000 | — |
+| Resource Sidebar | 240 | stretch | — |
+| Top Header / Toolbar | 100% | 72 | — |
+| Stage Card (Editor) | 640 | 480 | 8 |
+| Stage Card (Terminal) | 560 | 480 | 8 |
+| Tool Palette Popover | 560 | auto | 8 |
+| Action Buttons | auto | 32–34 | 6 |

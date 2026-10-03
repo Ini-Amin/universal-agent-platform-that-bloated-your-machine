@@ -580,11 +580,29 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   function createMonaco(monaco) {
     engine = 'monaco';
     editorHost.innerHTML = '';
+    if (monaco && monaco.editor && typeof monaco.editor.defineTheme === 'function') {
+      monaco.editor.defineTheme('sds-dark', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [
+          { token: '', foreground: 'E2E6F0', background: '1B1E28' },
+        ],
+        colors: {
+          'editor.background': '#1B1E28',
+          'editor.foreground': '#E2E6F0',
+          'editor.lineHighlightBackground': '#212530',
+          'editor.selectionBackground': '#dd7fd333',
+          'editorLineNumber.foreground': '#9AA1B4',
+          'editorLineNumber.activeForeground': '#E2E6F0',
+          'editorGutter.background': '#1B1E28',
+        },
+      });
+    }
     monacoEditor = monaco.editor.create(editorHost, {
       value: fallbackCode,
       language: monacoLanguageId(language),
-      theme: 'vs-dark',
-      automaticLayout: true,
+      theme: 'sds-dark',
+      fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       minimap: { enabled: false },
       fontSize: 12,
       tabSize: 4,
