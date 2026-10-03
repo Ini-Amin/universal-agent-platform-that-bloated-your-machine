@@ -1,9 +1,11 @@
 // §53 Execution UI & Inspector Pane
 // Shows selected node details + referenced resources, execution status/metrics,
 // decision traces, library/system resources, artifact content viewer,
-// and runtime controls (Pause/Resume/Fork).
+// runtime controls (Pause/Resume/Fork) and pending approval decisions.
 
 import {
+  decideApproval,
+  getTask,
   getExecutionTraces,
   pauseExecution,
   resumeExecution,
@@ -30,11 +32,92 @@ function escapeHtml(str) {
   });
 }
 
+// Mirrors RISK_TIERS in src/uap/tools/registry.py.
+const RISK_TIER_LABELS = { 0: 'pure local', 1: 'passive external', 2: 'active external', 3: 'side-effectful' };
+
+// GET /tasks/{id} lists only the run's still-undecided approvals.
+function pendingApprovalsOf(execState) {
+  const list = execState && execState.task && execState.task.pending_approvals;
+  return Array.isArray(list)
+    ? list.filter((a) => a && a.approval_id && (a.state || 'pending_approval') === 'pending_approval')
+    : [];
+}
+
+function formatTimestamp(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+// request() in api.js throws "HTTP <status>: <body>"; FastAPI bodies are {"detail": "..."}.
+function errorDetail(err) {
+  try {
+    const detail = JSON.parse(err.body).detail;
+    if (typeof detail === 'string' && detail) return detail;
+  } catch {
+    /* body is not JSON */
+  }
+  return (err && err.message) || String(err);
+}
+
+// `deciding` maps approval_id -> 'approve' | 'reject' while that decision is in flight.
+export function renderApprovalsHtml(approvals, deciding = new Map()) {
+  if (!Array.isArray(approvals) || approvals.length === 0) return '';
+  const cards = approvals.map((approval) => {
+    const id = String(approval.approval_id);
+    const action = String(approval.action || 'unknown action');
+    const { tier, ...rest } = approval.details && typeof approval.details === 'object' ? approval.details : {};
+    const argsOnly = Object.keys(rest).length === 1 && 'args' in rest;
+    const shown = argsOnly ? rest.args : rest;
+    const hasDetails = shown !== undefined && shown !== null
+      && !(typeof shown === 'object' && Object.keys(shown).length === 0);
+    const tierText = Number.isInteger(tier) && RISK_TIER_LABELS[tier]
+      ? `Tier ${tier} · ${RISK_TIER_LABELS[tier]}`
+      : (tier !== undefined && tier !== null ? `Tier ${tier}` : '');
+    const mode = deciding.get(id);
+    const busy = mode ? 'disabled' : '';
+    const button = (decision, cls, label, busyLabel) => `
+      <button type="button" class="btn ${cls} btn-sm btn-approval-decide" style="flex: 1;"
+        data-approval-id="${escapeHtml(id)}" data-decision="${decision}"
+        aria-label="${escapeHtml(`${label} ${action}`)}" ${busy}>${mode === decision ? busyLabel : label}</button>`;
+    return `
+      <div class="approval-card" role="group" aria-label="${escapeHtml(`Approval request: ${action}`)}"
+        style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px;">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;">
+          <strong class="font-mono" style="font-size: 13px; overflow-wrap: anywhere;">${escapeHtml(action)}</strong>
+          ${tierText ? `<span class="badge badge-warn">${escapeHtml(tierText)}</span>` : ''}
+        </div>
+        <div class="text-muted" style="font-size: 11px; margin-top: 4px;">
+          ${approval.requested_at ? `<time datetime="${escapeHtml(approval.requested_at)}">Requested ${escapeHtml(formatTimestamp(approval.requested_at))}</time> · ` : ''}<span class="font-mono" title="${escapeHtml(id)}">#${escapeHtml(id.slice(0, 8))}</span>
+        </div>
+        <h4 style="font-size: 11px; color: var(--fg-muted); margin: 10px 0 4px;">${argsOnly ? 'Arguments' : 'Details'}</h4>
+        ${hasDetails
+          ? `<pre class="code-block" style="margin: 0; overflow-wrap: anywhere;">${escapeHtml(JSON.stringify(shown, null, 2))}</pre>`
+          : '<div class="text-muted" style="font-size: 11px;">None recorded.</div>'}
+        <div class="btn-group" style="margin-top: 10px;">
+          ${button('reject', 'btn-warn', 'Reject', 'Rejecting…')}
+          ${button('approve', 'btn-ok', 'Approve', 'Approving…')}
+        </div>
+      </div>`;
+  }).join('');
+  return `
+    <div class="inspector-section approvals-section" role="region" aria-labelledby="approvals-title"
+      style="background: rgba(210, 153, 34, 0.08); border-left: 3px solid var(--warn);">
+      <h3 id="approvals-title" class="section-title" style="color: var(--warn);">Needs your approval (${approvals.length})</h3>
+      <p class="text-muted" style="font-size: 11px; line-height: 1.4; margin: 0 0 10px;">
+        These actions are blocked until a person decides. The decision is recorded on each approval; it does not restart or resume the run by itself.
+      </p>
+      ${cards}
+    </div>`;
+}
+
 export function initInspector(containerEl, { eventStream = null } = {}) {
   if (!containerEl) return null;
 
   let currentTraces = [];
   let lastFetchedExecutionId = null;
+  // render() rebuilds the pane on every store change, so in-flight decisions
+  // live here (not on the buttons) to keep them disabled across re-renders.
+  const deciding = new Map();
 
   async function fetchTraces(executionId) {
     if (!executionId || executionId === lastFetchedExecutionId) return;
@@ -60,20 +143,83 @@ export function initInspector(containerEl, { eventStream = null } = {}) {
       fetchTraces(execState.executionId);
     }
 
-    // 1. Contextual view: Selected Library / System Resource
     if (uiState.selectedResource) {
+      // 1. Contextual view: Selected Library / System Resource
       renderResourceInspector(uiState.selectedResource);
-      return;
-    }
-
-    // 2. Contextual view: Selected Graph Node
-    if (selectedNode) {
+    } else if (selectedNode) {
+      // 2. Contextual view: Selected Graph Node
       renderNodeInspector(selectedNode);
-      return;
+    } else {
+      // 3. Default view: Execution Overview + Output & Artifacts + Controls + Traces
+      renderExecutionOverview(execState, graph);
     }
 
-    // 3. Default view: Execution Overview + Output & Artifacts + Controls + Traces
-    renderExecutionOverview(execState, graph);
+    // A pending approval blocks the run, so it sits above whichever view is open.
+    renderApprovals(execState);
+  }
+
+  // --- Approvals (human decision on a blocked tool call) ---
+  function renderApprovals(execState) {
+    const approvals = pendingApprovalsOf(execState);
+    if (approvals.length === 0) return;
+    containerEl.insertAdjacentHTML('afterbegin', renderApprovalsHtml(approvals, deciding));
+    containerEl.querySelectorAll('.btn-approval-decide').forEach((btn) => {
+      btn.onclick = () => decide(btn.getAttribute('data-approval-id'), btn.getAttribute('data-decision') === 'approve');
+    });
+  }
+
+  // Refetch the run's detail so the decided approval leaves the list. When the
+  // fetch fails but the approval is known to be gone, drop it locally instead.
+  async function refreshTask(executionId, goneApprovalId = null) {
+    let task = null;
+    try {
+      task = await getTask(executionId);
+    } catch {
+      /* keep the cached detail */
+    }
+    const current = executionStore.getState();
+    if (current.executionId !== executionId) return;
+    if (!task && goneApprovalId && current.task) {
+      task = {
+        ...current.task,
+        pending_approvals: (current.task.pending_approvals || []).filter((a) => a.approval_id !== goneApprovalId),
+      };
+    }
+    if (task) executionStore.setState({ task, status: task.status || current.status });
+  }
+
+  async function decide(approvalId, approved) {
+    const executionId = executionStore.getState().executionId;
+    if (!executionId || !approvalId || deciding.has(approvalId)) return;
+    const approval = pendingApprovalsOf(executionStore.getState()).find((a) => a.approval_id === approvalId);
+    const action = approval ? approval.action : 'the action';
+    deciding.set(approvalId, approved ? 'approve' : 'reject');
+    render();
+    let gone = null;
+    try {
+      await decideApproval(approvalId, approved);
+      gone = approvalId;
+      showToast(approved
+        ? { kind: 'info', title: 'Approval recorded', message: `Approved ${action}. The decision is saved on the approval; the run is not restarted automatically.` }
+        : { kind: 'info', title: 'Rejection recorded', message: `Rejected ${action}. The decision is saved on the approval; the action stays blocked.` });
+    } catch (err) {
+      const detail = errorDetail(err);
+      if (err && err.status === 409) {
+        gone = approvalId;
+        showToast({ kind: 'warn', title: 'Already decided', message: `${detail}. Showing the latest state.` });
+      } else if (err && err.status === 404) {
+        gone = approvalId;
+        showToast({ kind: 'error', title: 'Approval not found', message: `${detail}. Showing the latest state.` });
+      } else {
+        showToast({ kind: 'error', title: 'Decision Failed', message: detail });
+      }
+    }
+    try {
+      await refreshTask(executionId, gone);
+    } finally {
+      deciding.delete(approvalId);
+      render();
+    }
   }
 
   // --- 1. Resource Inspector (Agents, Tools, Skills, Knowledge, Models, MCP, Policies, Artifacts) ---
