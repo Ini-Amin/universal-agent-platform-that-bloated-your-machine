@@ -34,6 +34,12 @@ body {
   width: 100vw;
 }
 
+/* The browser default (#757575) is 3.3-3.6:1 on the dark panels. */
+::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
+}
+
 .ide-container {
   display: flex;
   flex-direction: row;
@@ -752,7 +758,7 @@ body {
   min-width: 0;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  /* No overflow override: .stage clips, so cards cannot scroll the stage area. */
 }
 
 /* Header */
@@ -2130,6 +2136,7 @@ textarea:focus-visible,
 .stage-grid-split-2 .stage-card {
   width: 100%;
   max-width: 100%;
+  max-height: calc(100% - var(--card-y, 16px) - 16px);
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
@@ -2137,11 +2144,15 @@ textarea:focus-visible,
   box-sizing: border-box;
 }
 
+/* A split-4 card fills the room left in its region after the 16px gutter and
+   its cascade offset (--card-x/--card-y, set by the stage), so the close
+   button and resize grip never leave the region. */
 .stage-grid-split-4 .stage-card {
-  width: 100%;
-  height: 100%;
-  max-width: 100%;
-  max-height: 100%;
+  width: calc(100% - var(--card-x, 16px) - 16px);
+  height: calc(100% - var(--card-y, 16px) - 16px);
+  min-width: 0;
+  max-width: calc(100% - var(--card-x, 16px) - 16px);
+  max-height: calc(100% - var(--card-y, 16px) - 16px);
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
@@ -2155,17 +2166,14 @@ textarea:focus-visible,
   left: 16px !important;
 }
 
+/* Per-kind heights only: every kind takes its top from the stage's cascade
+   (inline top), so a tall editor or whiteboard cannot cover the cards cascaded
+   in the same region. */
 .stage-grid-split-2 .stage-card[data-kind="editor"]:not(.stage-card-dragged),
-.stage-grid-split-2 .stage-card[data-kind="code"]:not(.stage-card-dragged) {
-  height: calc((100% - 24px) / 2);
-  max-height: 382px;
-  top: 0 !important;
-}
-
+.stage-grid-split-2 .stage-card[data-kind="code"]:not(.stage-card-dragged),
 .stage-grid-split-2 .stage-card[data-kind="terminal"]:not(.stage-card-dragged) {
   height: calc((100% - 24px) / 2);
   max-height: 382px;
-  top: calc(50% + 12px) !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="iframe"]:not(.stage-card-dragged),
@@ -2173,7 +2181,6 @@ textarea:focus-visible,
   height: calc(100% - 196px);
   min-height: 280px;
   max-height: 583px;
-  top: 0 !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="note"]:not(.stage-card-dragged),
@@ -2273,6 +2280,8 @@ textarea:focus-visible,
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  /* Query container for the narrow-card rules below. */
+  container-type: inline-size;
 }
 
 .stage-card-kind {
@@ -2361,6 +2370,20 @@ textarea:focus-visible,
 .stage-card-action-btn:focus-visible {
   outline: 1px solid var(--accent);
   color: var(--fg);
+}
+
+/* As a card narrows (split regions in a small window) the kind badge goes
+   first, then the actions, so the title and close button always stay visible. */
+@container (max-width: 430px) {
+  .stage-card-kind {
+    display: none;
+  }
+}
+
+@container (max-width: 360px) {
+  .stage-card-actions {
+    display: none;
+  }
 }
 
 .stage-card-body {
@@ -2497,6 +2520,7 @@ textarea:focus-visible,
 .stage-media-error {
   color: var(--err);
   font-size: 12px;
+  overflow-wrap: anywhere;
   border: 1px solid var(--err);
   border-radius: 6px;
   padding: 10px;
