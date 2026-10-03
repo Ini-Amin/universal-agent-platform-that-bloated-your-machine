@@ -42,6 +42,8 @@ handed to the executor.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -55,6 +57,7 @@ from uap.db.repositories import (
     DefinitionRepository,
     EventRepository,
     ExecutionRepository,
+    TERMINAL_EXECUTION_STATUSES,
 )
 from uap.db.models.definitions import VersionStatus
 from uap.graph import WorkflowGraph
@@ -103,16 +106,44 @@ class _CheckpointingRuntime:
     ``execution_id`` from the per-run ``ctx``. Subworkflow executions use a
     synthetic ``parent/node`` id (not a UUID) and are not checkpointed here.
     """
-
     def __init__(self, inner: Any, session_factory: Any) -> None:
         self._inner = inner
         self._session_factory = session_factory
 
+    def _check_pause(self, execution_id: str, correlation_id: str | None = None) -> bool:
+        try:
+            from uap.runtime.run_control import run_controls
+            ctrl = run_controls().get(str(execution_id))
+            if ctrl is None and correlation_id:
+                ctrl = run_controls().get(str(correlation_id))
+            if ctrl is not None and ctrl.status == "paused":
+                return True
+        except Exception:
+            pass
+        return False
+
     async def run_node(self, node: Any, inputs: dict[str, Any], ctx: Any) -> dict[str, Any]:
+        execution_id = str(getattr(ctx, "execution_id", "") or "")
+        correlation_id = (getattr(ctx, "metadata", {}) or {}).get("correlation_id")
+
+        # 1. Check pause before node starts
+        if self._check_pause(execution_id, correlation_id):
+            from uap.contracts.models import ApprovalRequest
+            from uap.execution.context import PauseExecution
+            raise PauseExecution(ApprovalRequest(task_id=execution_id, action="cooperative_pause"))
+
+        pacing_ms = float(os.environ.get("UAP_NODE_PACING_MS", "30"))
+        if pacing_ms > 0:
+            await asyncio.sleep(pacing_ms / 1000.0)
+
+        if self._check_pause(execution_id, correlation_id):
+            from uap.contracts.models import ApprovalRequest
+            from uap.execution.context import PauseExecution
+            raise PauseExecution(ApprovalRequest(task_id=execution_id, action="cooperative_pause"))
+
         outputs = await self._inner.run_node(node, inputs, ctx)
         self._checkpoint(node, outputs, ctx)
         return outputs
-
     def _checkpoint(self, node: Any, outputs: dict[str, Any], ctx: Any) -> None:
         execution_id = str(getattr(ctx, "execution_id", "") or "")
         try:
@@ -142,6 +173,18 @@ class _CheckpointingRuntime:
                 },
                 node_id=node.id,
             )
+            # Check if pause was requested in DB metadata and sync to in-memory gate
+            repo = ExecutionRepository(session)
+            try:
+                eid = uuid.UUID(execution_id)
+                row = repo.get(eid) or repo.get_by_correlation_id(eid)
+                if row is not None:
+                    meta = (row.input or {}).get(RUNTIME_KEY, {})
+                    if meta.get("pause_requested"):
+                        from uap.runtime.run_control import get_control
+                        get_control(execution_id).pause()
+            except Exception:
+                pass
 
 def _parse_ref(workflow_ref: str) -> tuple[str, int | None]:
     """Split ``"name@v3"`` into ``("name", 3)``; ``"name"`` -> ``("name", None)``."""
@@ -341,28 +384,52 @@ class ExecutionService:
             return str(row.id)
 
     def pause_request(self, execution_id: str) -> None:
-        """Set the cooperative-pause marker checked between nodes (section 37)."""
+        """Set the cooperative-pause marker checked between nodes (section 37).
 
-        eid = uuid.UUID(str(execution_id))
+        The marker is written durably AND armed in the in-memory run-control
+        registry under the client-facing id, the durable row id and the
+        correlation id. The in-memory arm happens *before* the row lookup so a
+        pause issued in the window between ``POST /tasks`` returning and the
+        slice enqueuing its execution row is not lost (verified 2026-10-03: the
+        pause arrived 13ms in, the row did not exist yet, and the run still
+        flipped to ``completed``).
+        """
+
+        from uap.runtime.run_control import get_control
+        # Arm first, under the client id, so an about-to-start run sees it.
+        get_control(str(execution_id)).pause()
         with self._scope() as session:
-            row = ExecutionRepository(session).get(eid)
-            if row is None:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
+                # The row does not exist yet (run still starting): the armed
+                # control is enough; run_claimed honors it when it claims.
                 raise LookupError(f"execution {execution_id} not found")
+            row = ExecutionRepository(session).get(eid)
+            if row.status in TERMINAL_EXECUTION_STATUSES:
+                return
+            get_control(str(eid)).pause()
+            if row.correlation_id is not None:
+                get_control(str(row.correlation_id)).pause()
             self._write_runtime(session, row, pause_requested=True)
             EventRepository(session).append(eid, "pause_requested", payload={})
 
     def resume(self, execution_id: str) -> None:
         """Clear the cooperative-pause marker and re-queue a paused execution."""
 
-        eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
-            row = ExecutionRepository(session).get(eid)
-            if row is None:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
                 raise LookupError(f"execution {execution_id} not found")
-            self._write_runtime(session, row, pause_requested=False)
+            row = ExecutionRepository(session).get(eid)
+            self._write_runtime(session, row, pause_requested=False, pause_honored=False)
             if row.status is ExecutionStatus.PAUSED:
                 ExecutionRepository(session).update_status(eid, STATUS_QUEUED)
-
+        try:
+            from uap.runtime.run_control import get_control
+            get_control(str(execution_id)).resume()
+            get_control(str(eid)).resume()
+        except Exception:
+            pass
     def approve_and_resume(
         self,
         execution_id: str,
@@ -376,11 +443,11 @@ class ExecutionService:
         execution for a worker; ``approved=False`` cancels it with a reason.
         """
 
-        eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
-            row = ExecutionRepository(session).get(eid)
-            if row is None:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
                 raise LookupError(f"execution {execution_id} not found")
+            row = ExecutionRepository(session).get(eid)
             meta = self._runtime_meta(row)
             pending = meta.get("pending_approval") or {}
             recorded_id = pending.get("approval_id") if isinstance(pending, Mapping) else None
@@ -441,12 +508,11 @@ class ExecutionService:
         ``EXECUTION_STARTED`` on the child. The source execution is untouched.
         """
 
-        eid = uuid.UUID(str(execution_id))
         with self._scope() as session:
-            source = ExecutionRepository(session).get(eid)
-            if source is None:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
                 raise LookupError(f"execution {execution_id} not found")
-
+            source = ExecutionRepository(session).get(eid)
             checkpoints = CheckpointStore(session).list_for_execution(str(eid))
             if from_seq is None:
                 chosen = checkpoints[-1] if checkpoints else None
@@ -581,6 +647,17 @@ class ExecutionService:
                 for event in rows
             ]
 
+    def _is_pause_requested(self, execution_id: str) -> bool:
+        with self._scope() as session:
+            eid = self._resolve_execution_id(session, execution_id)
+            if eid is None:
+                return False
+            row = ExecutionRepository(session).get(eid)
+            if row is None:
+                return False
+            meta = self._runtime_meta(row)
+            return bool(meta.get("pause_requested"))
+
     def checkpoints(self, execution_id: str) -> list[tuple[int, dict]]:
         """Return ``(seq, state)`` checkpoints for an execution, ascending.
 
@@ -614,7 +691,17 @@ class ExecutionService:
             if row is None:
                 return "failed"
             meta = self._runtime_meta(row)
-            if meta.get("pause_requested"):
+            correlation_id = (
+                str(row.correlation_id) if row.correlation_id is not None else None
+            )
+            # A pause armed before the row existed (client id) or under either
+            # id must stop the run here, before any node executes.
+            from uap.runtime.run_control import run_controls
+            ctrls = run_controls()
+            armed = ctrls.get(str(eid))
+            if armed is None and correlation_id is not None:
+                armed = ctrls.get(correlation_id)
+            if meta.get("pause_requested") or (armed is not None and armed.status == "paused"):
                 self._write_runtime(session, row, pause_requested=False, pause_honored=True)
                 ExecutionRepository(session).update_status(eid, ExecutionStatus.PAUSED)
                 EventRepository(session).append(
@@ -628,6 +715,12 @@ class ExecutionService:
                 return "paused"
             inputs = self._user_inputs(row)
             workflow_ref = meta.get("workflow_ref")
+
+        # Make the client-facing id visible to the node runtime so a pause
+        # armed under either id is honored between nodes.
+        if correlation_id is not None:
+            meta = {**meta, "correlation_id": correlation_id}
+
 
         graph = self._graph_resolver(workflow_ref)
 
@@ -770,12 +863,30 @@ class ExecutionService:
         error = getattr(result, "error", None)
         pending = getattr(result, "pending_approval", None)
 
+        is_coop_pause = False
+        if pending is not None and getattr(pending, "action", "") == "cooperative_pause":
+            is_coop_pause = True
+            pending = None
+            saw_pause = True
+            for nid, nst in list(node_status.items()):
+                if nst == "paused":
+                    del node_status[nid]
+            if order and order[-1] not in node_results:
+                order.pop()
+
         node_kind = {node.id: node.kind.value for node in graph.nodes}
 
         with self._scope() as session:
             row = ExecutionRepository(session).get(eid)
             if row is None:
                 return "failed"
+            meta = self._runtime_meta(row)
+            if meta.get("pause_requested"):
+                saw_pause = True
+
+            if saw_pause or is_coop_pause:
+                status = "paused"
+
             store = CheckpointStore(session)
             events = EventRepository(session)
 
@@ -865,10 +976,11 @@ class ExecutionService:
                     payload={"reason": "interrupted"},
                 )
                 final = "paused"
-            elif saw_pause:
+            elif saw_pause or is_coop_pause:
                 # A user-requested cooperative pause takes precedence: the user
                 # asked to stop, and any approval can be re-raised on resume.
                 repo.update_status(eid, ExecutionStatus.PAUSED, output=_jsonable(outputs))
+                self._write_runtime(session, row, pause_requested=False, pause_honored=True)
                 events.append(
                     eid,
                     self._event_type_value("EXECUTION_PAUSED"),

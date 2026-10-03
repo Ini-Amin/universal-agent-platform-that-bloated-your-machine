@@ -48,6 +48,8 @@ from uap.workflows.bbp import WORKFLOW_NAME as BBP_WORKFLOW_NAME
 from uap.workflows.bbp import BBPWorkflow
 from uap.workflows.research import WORKFLOW_NAME as RESEARCH_WORKFLOW_NAME
 from uap.workflows.research import ResearchWorkflow
+from uap.workflows.learning import WORKFLOW_NAME as LEARNING_WORKFLOW_NAME
+from uap.workflows.learning import LearningWorkflow
 from uap.workflows.scope import ScopeGate, ScopeRuleError
 
 from uap.mcp.config import BUG_BOUNTY_MCP_CONFIG, MCPServerConfig
@@ -74,7 +76,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _INDEX_HTML = _STATIC_DIR / "index.html"
 _UI_DIR = Path(__file__).resolve().parents[3] / "ui"
 #: Domains the server can actually execute. Everything else is a clarification.
-_EXECUTABLE = frozenset({Domain.RESEARCH, Domain.BBP})
+_EXECUTABLE = frozenset({Domain.RESEARCH, Domain.BBP, Domain.LEARNING})
 
 #: Example of the executable requests, shown when a domain cannot be run yet.
 _AVAILABLE_DOMAINS_EXAMPLE = (
@@ -127,6 +129,13 @@ class WorkspaceFromTemplateRequest(BaseModel):
     input: str = ""
     user_id: str | None = None
 
+class StartProgramRequest(BaseModel):
+    """Body of ``POST /api/providers/{name}/programs/{program_id}/start``."""
+
+    scope: str | None = None
+    user_id: str | None = None
+    workspace_id: str | None = None
+
 class DecisionRequest(BaseModel):
     """Body of ``POST /approvals/{approval_id}/decide``."""
 
@@ -167,6 +176,7 @@ class RunRecord:
     context: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.monotonic)
     requested_by: str | None = None
+    views: list[dict[str, Any]] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -511,10 +521,14 @@ def create_app(
     # the gate is per-task policy, not shared mutable state.
     bbp = BBPWorkflow()
     _instrument(bbp, event_bus)
+    learning = LearningWorkflow()
+    _instrument(learning, event_bus)
 
     registry = WorkflowRegistry()
     registry.register(RESEARCH_WORKFLOW_NAME, research)
     registry.register(BBP_WORKFLOW_NAME, bbp)
+    registry.register(LEARNING_WORKFLOW_NAME, learning)
+    registry.register(Domain.LEARNING.value, learning)
     router = Router(registry)
     gate = ApprovalGate()
 
@@ -588,6 +602,7 @@ def create_app(
     app.state.model_router = model_router
     app.state.research = research
     app.state.bbp = bbp
+    app.state.learning = learning
     app.state.run_inline = run_inline
     app.state.heartbeat_interval = heartbeat_interval
     # Defaults so request handlers are safe even if lifespan has not run
@@ -612,6 +627,8 @@ def create_app(
                 wf = research
             elif name == BBP_WORKFLOW_NAME:
                 wf = bbp
+            elif name in (LEARNING_WORKFLOW_NAME, "LearningWorkflow"):
+                wf = learning
             else:
                 raise KeyError(ref)
             return WorkflowGraph.from_dict(wf.graph_spec())
@@ -777,6 +794,66 @@ def create_app(
             state = workflow.runner.state_store.load(spec.task_id)
             if state is not None:
                 record.node_history = list(state.node_history)
+                node_views = state.data.get("node_views") or []
+                if node_views:
+                    record.views = node_views
+                    factory = (
+                        getattr(getattr(app.state, "slice", None), "_session_factory", None)
+                        or getattr(getattr(app.state, "service", None), "_session_factory", None)
+                    )
+                    if factory is not None:
+                        try:
+                            import uuid as _uuid
+                            from uap.db.engine import session_scope
+                            from uap.db.models.definitions import VersionStatus
+                            from uap.db.models.execution import ExecutionStatus
+                            from uap.db.repositories import (
+                                DefinitionRepository,
+                                EventRepository,
+                                ExecutionRepository,
+                            )
+                            from uap.views.store import NODE_VIEW_EVENT_KIND, NodeViewStore
+
+                            with session_scope(factory) as session:
+                                repo = DefinitionRepository(session)
+                                def_row = repo.get_definition_by_name("learning-workflow")
+                                if def_row is None:
+                                    def_row = repo.create_definition(name="learning-workflow")
+                                versions = repo.list_versions(def_row.id)
+                                v_row = versions[0] if versions else repo.create_version(
+                                    def_row.id,
+                                    version=1,
+                                    status=VersionStatus.ACTIVE,
+                                    spec={"graph_ref": "workflow:learning@v1"},
+                                )
+                                corr_id = _uuid.UUID(str(record.task_id))
+                                exec_repo = ExecutionRepository(session)
+                                exec_row = exec_repo.get_by_correlation_id(corr_id)
+                                if exec_row is None:
+                                    exec_row = exec_repo.create(
+                                        v_row.id,
+                                        correlation_id=corr_id,
+                                        status=ExecutionStatus.COMPLETED,
+                                        requested_by=record.requested_by,
+                                    )
+                                store = NodeViewStore(session)
+                                event_repo = EventRepository(session)
+                                for item in node_views:
+                                    store.publish(exec_row.id, item["node_id"], item["view"])
+                                    event_repo.append(
+                                        exec_row.id,
+                                        NODE_VIEW_EVENT_KIND,
+                                        node=item["node_id"],
+                                        payload={"view": item["view"]},
+                                    )
+                        except Exception as exc:
+                            log_swallowed_exception(
+                                logger,
+                                exc,
+                                "failed to persist workflow views to database",
+                                level=logging.WARNING,
+                                task_id=record.task_id,
+                            )
             record.output = result.output or ""
             record.error = result.error
             record.artifacts = [
@@ -854,123 +931,7 @@ def create_app(
                 pipeline=workflow,
                 task=spec,
             )
-            if result.task_id and result.task_id != record.task_id:
-                runs[result.task_id] = record
-                record.task_id = result.task_id
-            if result.execution_id:
-                runs[result.execution_id] = record
-            record.workspace_id = result.workspace_id or record.workspace_id
-            record.context = result.context
-            # Report the evidence source HONESTLY. This field was hardcoded to
-            # "deterministic-stubs" and never updated, so a run that really
-            # called bugbounty-mcp (crt.sh subdomain enumeration, live HTTP
-            # probes) still told the user its findings were fake — and a run
-            # that really used stubs claimed nothing at all. Verified
-            # 2026-10-03: MCP tools were invoked, the subdomains matched crt.sh
-            # exactly, and the label still said "deterministic-stubs".
-            record.evidence_source = _evidence_source_for(record.task_id, app)
-            # SliceResult.artifacts holds artifact IDS; the store writes files
-            # named "{artifact_id}__v{n}__{source}" under artifacts_root/<task_id>/
-            # with a sidecar .meta.json carrying the real artifact type.
-            artifact_dir = runs_root / "artifacts" / record.task_id
-            resolved: list[dict[str, Any]] = []
-            for artifact_id in result.artifacts:
-                matches = sorted(artifact_dir.glob(f"{artifact_id}__*"))
-                matches = [m for m in matches if not m.name.endswith(".meta.json")]
-                if not matches:
-                    continue
-                path = matches[0]
-                artifact_type = path.name
-                meta_path = path.with_name(path.name + ".meta.json")
-                if meta_path.is_file():
-                    try:
-                        artifact_type = json.loads(meta_path.read_text(encoding="utf-8")).get(
-                            "type", artifact_type
-                        )
-                    except (OSError, ValueError) as exc:
-                        log_swallowed_exception(
-                            logger,
-                            exc,
-                            "failed to read artifact sidecar metadata",
-                            level=logging.DEBUG,
-                            meta_path=str(meta_path),
-                        )
-                target_path = artifact_dir / str(artifact_type)
-                if not target_path.exists() and path.is_file():
-                    try:
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        target_path.write_bytes(path.read_bytes())
-                    except OSError:
-                        pass
-                resolved.append({
-                    "type": str(artifact_type),
-                    "uri": str(target_path if target_path.exists() else path),
-                })
-            record.artifacts = resolved
-            # The run's output is the synthesis artifact's text when available
-            # (that is what the user asked for); fall back to any text file.
-            output = ""
-            for item in resolved:
-                path = Path(item["uri"])
-                if "synthesize" in path.name or "output" in path.name:
-                    try:
-                        if path.is_file():
-                            output = path.read_text(encoding="utf-8")
-                            break
-                    except (OSError, UnicodeError) as exc:
-                        log_swallowed_exception(
-                            logger,
-                            exc,
-                            "failed to read artifact text content",
-                            level=logging.DEBUG,
-                            path=str(path),
-                        )
-            if not output:
-                for item in resolved:
-                    path = Path(item["uri"])
-                    try:
-                        if path.is_file():
-                            output = path.read_text(encoding="utf-8")
-                            break
-                    except (OSError, UnicodeError) as exc:
-                        log_swallowed_exception(
-                            logger,
-                            exc,
-                            "failed to read artifact text content",
-                            level=logging.DEBUG,
-                            path=str(path),
-                        )
-            record.output = output
-            record.error = result.error
-            record.status = "failed" if result.error else "completed"
-            # Node history comes from the durable execution events (the slice
-            # runs its own graph: input/recon/fetch/summarize/synthesize/
-            # evaluate/knowledge/output), so the UI can show real progress.
-            if result.execution_id:
-                try:
-                    from uap.db.engine import session_scope
-                    from uap.db.repositories import EventRepository
-
-                    with session_scope(session_factory) as session:
-                        rows = EventRepository(session).read_since(
-                            uuid.UUID(str(result.execution_id)), 0
-                        )
-                    history = [
-                        str(event.node)
-                        for event in rows
-                        if event.kind == "node_started" and event.node
-                    ]
-                    if record.domain == Domain.BBP:
-                        history = [n for n in history if n not in ("input", "output")]
-                    record.node_history = history
-                except Exception as exc:
-                    log_swallowed_exception(
-                        logger,
-                        exc,
-                        "failed to read execution events for node_history",
-                        level=logging.WARNING,
-                        execution_id=str(result.execution_id),
-                    )
+            _fold_slice_result(record, result)
         except Exception as exc:
             record.status = "failed"
             record.error = f"{type(exc).__name__}: {redact_text(str(exc))}"
@@ -982,7 +943,8 @@ def create_app(
                 task_id=record.task_id,
             )
         finally:
-            drop_control(record.task_id)
+            if record.status != "paused":
+                drop_control(record.task_id)
             gate_pending = [
                 req.model_dump(mode="json")
                 for req in gate.pending()
@@ -996,6 +958,156 @@ def create_app(
                 workflow=record.workflow,
                 data={"status": record.status},
             )
+
+    def _fold_slice_result(record: RunRecord, result: Any) -> None:
+        if result.task_id and result.task_id != record.task_id:
+            runs[result.task_id] = record
+            record.task_id = result.task_id
+        if result.execution_id:
+            runs[result.execution_id] = record
+        record.workspace_id = result.workspace_id or record.workspace_id
+        record.context = result.context
+        record.evidence_source = _evidence_source_for(record.task_id, app)
+        artifact_dir = runs_root / "artifacts" / record.task_id
+        resolved: list[dict[str, Any]] = []
+        for artifact_id in result.artifacts:
+            matches = sorted(artifact_dir.glob(f"{artifact_id}__*"))
+            matches = [m for m in matches if not m.name.endswith(".meta.json")]
+            if not matches:
+                continue
+            path = matches[0]
+            artifact_type = path.name
+            meta_path = path.with_name(path.name + ".meta.json")
+            if meta_path.is_file():
+                try:
+                    artifact_type = json.loads(meta_path.read_text(encoding="utf-8")).get(
+                        "type", artifact_type
+                    )
+                except (OSError, ValueError) as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "failed to read artifact sidecar metadata",
+                        level=logging.DEBUG,
+                        meta_path=str(meta_path),
+                    )
+            target_path = artifact_dir / str(artifact_type)
+            if not target_path.exists() and path.is_file():
+                try:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_bytes(path.read_bytes())
+                except OSError:
+                    pass
+            resolved.append({
+                "type": str(artifact_type),
+                "uri": str(target_path if target_path.exists() else path),
+            })
+        record.artifacts = resolved
+        output = ""
+        for item in resolved:
+            path = Path(item["uri"])
+            if "synthesize" in path.name or "output" in path.name:
+                try:
+                    if path.is_file():
+                        output = path.read_text(encoding="utf-8")
+                        break
+                except (OSError, UnicodeError) as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "failed to read artifact text content",
+                        level=logging.DEBUG,
+                        path=str(path),
+                    )
+        if not output:
+            for item in resolved:
+                path = Path(item["uri"])
+                try:
+                    if path.is_file():
+                        output = path.read_text(encoding="utf-8")
+                        break
+                except (OSError, UnicodeError) as exc:
+                    log_swallowed_exception(
+                        logger,
+                        exc,
+                        "failed to read artifact text content",
+                        level=logging.DEBUG,
+                        path=str(path),
+                    )
+        record.output = output
+        record.error = result.error
+        if getattr(result, "execution_status", "") == "paused":
+            record.status = "paused"
+        else:
+            record.status = "failed" if result.error else "completed"
+        if result.execution_id:
+            try:
+                from uap.db.engine import session_scope
+                from uap.db.repositories import EventRepository
+
+                with session_scope(session_factory) as session:
+                    rows = EventRepository(session).read_since(
+                        uuid.UUID(str(result.execution_id)), 0
+                    )
+                history = [
+                    str(event.node)
+                    for event in rows
+                    if event.kind == "node_started" and event.node
+                ]
+                if record.domain == Domain.BBP:
+                    history = [n for n in history if n not in ("input", "output")]
+                record.node_history = history
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to read execution events for node_history",
+                    level=logging.WARNING,
+                    execution_id=str(result.execution_id),
+                )
+
+    async def _execute_slice_resume(
+        record: RunRecord | None,
+        execution_id: str,
+        slice_runner: Any,
+    ) -> None:
+        rec = record or runs.get(execution_id)
+        if rec is not None:
+            rec.status = "running"
+            event_bus.emit_kind(
+                EventKind.TASK_STARTED,
+                task_id=rec.task_id,
+                workflow=rec.workflow,
+                data={"domain": rec.domain, "goal": getattr(rec, "input", "")},
+            )
+        try:
+            result = await asyncio.to_thread(
+                slice_runner.resume,
+                execution_id,
+            )
+            if rec is not None:
+                _fold_slice_result(rec, result)
+        except Exception as exc:
+            if rec is not None:
+                rec.status = "failed"
+                rec.error = f"{type(exc).__name__}: {redact_text(str(exc))}"
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice resume execution failed",
+                level=logging.ERROR,
+                task_id=getattr(rec, "task_id", execution_id),
+            )
+        finally:
+            if rec is not None:
+                if rec.status != "paused":
+                    drop_control(rec.task_id)
+                event_bus.emit_kind(
+                    EventKind.TASK_FINISHED,
+                    task_id=rec.task_id,
+                    workflow=rec.workflow,
+                    data={"status": rec.status},
+                )
 
     # -- routes --------------------------------------------------------- #
 
@@ -1122,6 +1234,21 @@ def create_app(
         record = runs.get(task_id)
         if record is None:
             raise HTTPException(status_code=404, detail="unknown task")
+        svc = getattr(app.state, "service", None)
+        if svc is not None and hasattr(svc, "status"):
+            try:
+                st = svc.status(task_id)
+                if st and st.get("status") == "paused":
+                    record.status = "paused"
+                elif st and st.get("status") == "completed" and record.status != "completed" and record.output:
+                    record.status = "completed"
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to query execution status from service",
+                    level=logging.DEBUG,
+                )
         record.pending_approvals = [
             req.model_dump(mode="json")
             for req in gate.pending()
@@ -1159,8 +1286,10 @@ def create_app(
     _workflow_map: dict[str, Any] = {
         RESEARCH_WORKFLOW_NAME: research,
         BBP_WORKFLOW_NAME: bbp,
+        LEARNING_WORKFLOW_NAME: learning,
         "ResearchWorkflow": research,
         "BBPWorkflow": bbp,
+        "LearningWorkflow": learning,
     }
 
     def _graph_for_workflow(wf_name: str) -> dict[str, Any] | None:
@@ -1334,9 +1463,12 @@ def create_app(
                         ref = None
                         if version is not None and isinstance(version.spec, dict):
                             ref = version.spec.get("graph_ref")
-                        for wf in (research, bbp):
-                            graph_ref = getattr(wf, "graph_ref", None)
-                            if ref and graph_ref and graph_ref != ref:
+                        for wf, expected_key in (
+                            (learning, "learning"),
+                            (bbp, "bbp"),
+                            (research, "research"),
+                        ):
+                            if ref and expected_key not in ref:
                                 continue
                             if hasattr(wf, "graph_spec"):
                                 spec = wf.graph_spec()
@@ -1423,14 +1555,33 @@ def create_app(
         return graph
 
     # -- /api/executions/{id}/pause & resume ----------------------------- #
-
     @app.post("/api/executions/{execution_id}/pause")
     async def pause_execution(execution_id: str) -> dict[str, str]:
-        # Durable path (delegate to service).
+        record = runs.get(execution_id)
+        if record is not None and record.status in ("completed", "failed", "cancelled"):
+            return {"status": "not_running"}
         svc = getattr(app.state, "service", None)
+        if svc is not None and hasattr(svc, "status"):
+            try:
+                st = svc.status(execution_id)
+                if st and st.get("status") in ("completed", "failed", "cancelled"):
+                    return {"status": "not_running"}
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to query execution status from service",
+                    level=logging.DEBUG,
+                )
+        # Durable path (delegate to service).
         if svc is not None and hasattr(svc, "pause_request"):
             try:
                 svc.pause_request(execution_id)
+                if record is not None:
+                    record.status = "paused"
+                ctrl = run_controls().get(execution_id)
+                if ctrl is not None:
+                    ctrl.pause()
                 return {"status": "paused"}
             except Exception as exc:
                 log_swallowed_exception(
@@ -1440,8 +1591,6 @@ def create_app(
                     level=logging.WARNING,
                     execution_id=str(execution_id),
                 )
-
-        record = runs.get(execution_id)
         if record is None:
             return {"status": "unknown"}
         if record.status not in ("accepted", "running"):
@@ -1453,10 +1602,37 @@ def create_app(
 
     @app.post("/api/executions/{execution_id}/resume")
     async def resume_execution(execution_id: str) -> dict[str, str]:
+        record = runs.get(execution_id)
+        if record is not None and record.status in ("completed", "failed", "cancelled"):
+            return {"status": "not_running"}
         svc = getattr(app.state, "service", None)
+        if svc is not None and hasattr(svc, "status"):
+            try:
+                st = svc.status(execution_id)
+                if st and st.get("status") in ("completed", "failed", "cancelled"):
+                    return {"status": "not_running"}
+            except Exception as exc:
+                log_swallowed_exception(
+                    logger,
+                    exc,
+                    "failed to query execution status from service",
+                    level=logging.DEBUG,
+                )
+        slice_runner = getattr(app.state, "slice", None)
         if svc is not None and hasattr(svc, "resume"):
             try:
                 svc.resume(execution_id)
+                if record is not None:
+                    record.status = "running"
+                ctrl = run_controls().get(execution_id)
+                if ctrl is not None:
+                    ctrl.resume()
+                if slice_runner is not None and hasattr(slice_runner, "resume"):
+                    task = asyncio.create_task(
+                        _execute_slice_resume(record, execution_id, slice_runner)
+                    )
+                    app.state.background.add(task)
+                    task.add_done_callback(app.state.background.discard)
                 return {"status": "running"}
             except Exception as exc:
                 log_swallowed_exception(
@@ -1467,7 +1643,6 @@ def create_app(
                     execution_id=str(execution_id),
                 )
 
-        record = runs.get(execution_id)
         if record is None:
             return {"status": "unknown"}
         if record.status not in ("paused",):
@@ -1476,7 +1651,6 @@ def create_app(
         result = ctrl.resume()
         record.status = result
         return {"status": result}
-
     # -- /api/executions/{id}/traces (unchanged) ------------------------- #
 
     @app.get("/api/executions/{execution_id}/traces")
@@ -1563,9 +1737,12 @@ def create_app(
                 execution_id=str(execution_id),
             )
 
-        if not found and execution_id in runs:
+        record = runs.get(execution_id)
+        if not found and record is not None:
             found = True
-            views = []
+            views = getattr(record, "views", [])
+        elif not views and record is not None and getattr(record, "views", None):
+            views = getattr(record, "views", [])
 
         if not found:
             raise HTTPException(status_code=404, detail="unknown execution")
@@ -2098,6 +2275,76 @@ def create_app(
                 level=logging.WARNING,
             )
         return summary
+
+    # -- /api/providers -------------------------------------------------- #
+
+    @app.get("/api/providers")
+    async def list_providers() -> list[dict[str, Any]]:
+        """Return configured platforms and honest reasons for unavailable ones."""
+        from uap.providers import get_default_registry
+        registry = get_default_registry()
+        return [status.model_dump(mode="json") for status in registry.list_statuses()]
+
+    @app.get("/api/providers/{name}/programs")
+    async def list_provider_programs(name: str) -> list[dict[str, Any]]:
+        """Return normalized program list for a provider, or degrade honestly."""
+        from uap.providers import ProviderUnavailableError, get_default_registry
+        registry = get_default_registry()
+        source = registry.get(name)
+        if source is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider: {name}")
+        try:
+            programs = await asyncio.to_thread(source.list_programs)
+            return [p.model_dump(mode="json") for p in programs]
+        except ProviderUnavailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            logger.warning("Failed to fetch programs for provider '%s': %s", name, exc)
+            raise HTTPException(status_code=502, detail=f"provider error: {exc}")
+
+    @app.post("/api/providers/{name}/programs/{program_id}/start")
+    async def start_provider_program(
+        name: str,
+        program_id: str,
+        body: StartProgramRequest | None = None,
+    ) -> dict[str, Any]:
+        """Start a bug bounty task for the program's scope."""
+        from uap.providers import (
+            ProviderUnavailableError,
+            StartProgramRequest,
+            get_default_registry,
+        )
+        registry = get_default_registry()
+        source = registry.get(name)
+        if source is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider: {name}")
+        if not source.available():
+            raise HTTPException(status_code=400, detail=source.unavailable_reason())
+
+        scope: str | None = None
+        user_id: str | None = None
+        workspace_id: str | None = None
+        if body is not None:
+            scope = body.scope
+            user_id = body.user_id
+            workspace_id = body.workspace_id
+
+        if not scope:
+            try:
+                scope = await asyncio.to_thread(source.get_primary_scope, program_id)
+            except ProviderUnavailableError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                logger.warning("Failed to resolve scope for '%s': %s", program_id, exc)
+                raise HTTPException(
+                    status_code=404, detail=f"could not resolve scope for {program_id}"
+                )
+
+        if not scope:
+            raise HTTPException(status_code=404, detail=f"no scope found for {program_id}")
+
+        task_input = f"bug bounty on {scope}"
+        return await _start_task(task_input, user_id=user_id, workspace_id=workspace_id)
 
     # Canvas IDE is the primary UI at the root: mounted LAST so every API route
     # above wins; only unmatched paths (/, /js/*, /css/*) fall through to it.

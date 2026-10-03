@@ -31,6 +31,7 @@ __all__ = [
     "DOMAIN_RATIONALE",
     "SPEED_KEYWORDS",
     "capability_for",
+    "EXECUTABLE_DOMAINS",
 ]
 
 #: Lower rank = preferred when ``prefer="latency"``.
@@ -54,6 +55,13 @@ DOMAIN_CAPABILITY_MAP: dict[str, ModelCapability] = {
     Domain.DATA.value: ModelCapability.FAST,
     Domain.UNKNOWN.value: ModelCapability.REASONING,
 }
+
+#: Domains with executable workflows.
+EXECUTABLE_DOMAINS: frozenset[Domain] = frozenset({
+    Domain.RESEARCH,
+    Domain.BBP,
+    Domain.LEARNING,
+})
 
 #: Documented rationale explaining why each domain maps to its capability.
 DOMAIN_RATIONALE: dict[str, str] = {

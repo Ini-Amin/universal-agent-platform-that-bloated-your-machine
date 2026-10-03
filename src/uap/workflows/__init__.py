@@ -1,5 +1,9 @@
 """Domain workflows and the runner that drives them (Master sections 7 and 21)."""
 
+from .learning import (
+    WORKFLOW_NAME as LEARNING_WORKFLOW_NAME,
+    LearningWorkflow,
+)
 from .research import (
     DEFAULT_COLLECTORS,
     NODES,
@@ -22,6 +26,8 @@ __all__ = [
     "InMemoryStateStore",
     "NODES",
     "NodeResult",
+    "LEARNING_WORKFLOW_NAME",
+    "LearningWorkflow",
     "ResearchWorkflow",
     "StateStore",
     "WORKFLOW_NAME",

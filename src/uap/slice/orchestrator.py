@@ -821,6 +821,8 @@ class PlatformSlice:
             await Worker(service).run_specific(execution_id)
             status = service.status(execution_id)
             out.execution_status = status.get("status", "")
+            if out.execution_status == "paused":
+                return out
         except Exception as exc:
             log_swallowed_exception(
                 logger,
@@ -832,6 +834,117 @@ class PlatformSlice:
             out.error = (out.error + " | " if out.error else "") + f"execution failed: {exc!r}"
             return out
 
+        return self._finalize_slice_run(
+            out, execution_id, task, workspace, reason, active_pipeline, runtime, is_bbp, service, ref
+        )
+
+    def resume(
+        self,
+        execution_id: str,
+        *,
+        pipeline: Any | None = None,
+    ) -> SliceResult:
+        """Resume a previously paused execution from its latest checkpoint."""
+        return asyncio.run(
+            self._resume(execution_id, pipeline=pipeline)
+        )
+
+    async def _resume(
+        self,
+        execution_id: str,
+        *,
+        pipeline: Any | None = None,
+    ) -> SliceResult:
+        out = SliceResult()
+        import uuid as _uuid
+        from uap.runtime.service import RUNTIME_KEY
+        from uap.db.repositories import ExecutionRepository
+        session = self._session_factory()
+        try:
+            repo = ExecutionRepository(session)
+            eid = _uuid.UUID(str(execution_id))
+            row = repo.get(eid) or repo.get_by_correlation_id(eid)
+            if row is None:
+                out.execution_status = "failed"
+                out.error = f"execution {execution_id} not found"
+                return out
+            real_eid = str(row.id)
+            out.execution_id = real_eid
+            task_id = str(row.correlation_id or row.id)
+            out.task_id = task_id
+            task_goal = (row.input or {}).get("value", "")
+            meta = (row.input or {}).get(RUNTIME_KEY, {})
+            ref = meta.get("workflow_ref") or _WORKFLOW_REF
+            workspace_id = meta.get("workspace_id")
+            out.workspace_id = workspace_id
+        finally:
+            session.close()
+
+        is_bbp = "bbp" in ref
+        out.workflow_ref = ref
+        task = TaskSpec(
+            task_id=task_id,
+            goal=str(task_goal),
+            domain="bbp" if is_bbp else "research",
+        )
+        active_pipeline = pipeline if pipeline is not None else self.pipeline
+        tools = (
+            active_pipeline.tools
+            if (is_bbp and active_pipeline is not None and getattr(active_pipeline, "tools", None) is not None)
+            else self.tools
+        )
+        runtime = PlatformNodeRuntime(
+            self.agents,
+            tools,
+            task=task,
+            pipeline=active_pipeline,
+            session_factory=self._session_factory,
+        )
+        service = ExecutionService(
+            self._session_factory,
+            graph_resolver=self._resolve_graph,
+            node_runtime=runtime,
+            approval_gate=self.approval_gate,
+        )
+        try:
+            await Worker(service).run_specific(real_eid)
+            status = service.status(real_eid)
+            out.execution_status = status.get("status", "")
+            if out.execution_status == "paused":
+                return out
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "slice resume execution failed",
+                level=logging.ERROR,
+                task_id=task.task_id,
+            )
+            out.error = f"resume failed: {exc!r}"
+            return out
+
+        workspace = next((w for w in self.workspaces if w.id == workspace_id), None) or Workspace(
+            id=str(workspace_id or "default"),
+            name=str(workspace_id or "default"),
+            description="Resumed workspace",
+        )
+        return self._finalize_slice_run(
+            out, real_eid, task, workspace, "resumed execution", active_pipeline, runtime, is_bbp, service, ref
+        )
+
+    def _finalize_slice_run(
+        self,
+        out: SliceResult,
+        execution_id: str,
+        task: TaskSpec,
+        workspace: Any,
+        reason: str,
+        active_pipeline: Any,
+        runtime: PlatformNodeRuntime,
+        is_bbp: bool,
+        service: ExecutionService,
+        ref: str,
+    ) -> SliceResult:
         # Pull node results from the latest durable checkpoint.
         node_results: dict[str, Any] = {}
         try:

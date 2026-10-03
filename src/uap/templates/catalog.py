@@ -66,6 +66,11 @@ _BBP_WORKFLOW = {
     "workflow": "BBPWorkflow",
     "workflow_ref": "bbp",
 }
+_LEARNING_WORKFLOW = {
+    "domain": "learning",
+    "workflow": "LearningWorkflow",
+    "workflow_ref": "learning",
+}
 
 def _research_input(example: str, notes: str) -> dict[str, Any]:
     return {
@@ -85,6 +90,14 @@ def _bbp_input(example: str, notes: str) -> dict[str, Any]:
         # BBP fails closed: the scope gate refuses to probe anything without an
         # in-scope declaration. The UI must surface this before starting.
         "requires_scope": True,
+    }
+
+def _learning_input(example: str, notes: str) -> dict[str, Any]:
+    return {
+        "shape": {"input": example},
+        "example": example,
+        "required": ["input"],
+        "notes": notes,
     }
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +136,25 @@ CATALOG: list[dict[str, Any]] = [
                     "Lead with 'research' so the request routes to the research "
                     "workflow; name the topic and the target level.",
                 ),
-            }
+            },
+            {
+                "name": "interactive_backend_learning",
+                "title": "Interactive backend development from scratch",
+                "description": (
+                    "Interactive hands-on learning: analyzes the topic and level, "
+                    "plans an ordered curriculum, gathers real sources, and "
+                    "produces a ready-to-start code exercise with a finish line, "
+                    "a lesson explanation, and a sources list as canvas views."
+                ),
+                "tags": ["Learning", "Backend", "Interactive", "Code", "FastAPI"],
+                "mediaType": None,
+                "tutorialUrl": None,
+                "workflow": _LEARNING_WORKFLOW,
+                "input": _learning_input(
+                    "learn backend development from scratch to intermediate",
+                    "Lead with 'learn' or 'study'; name the topic and desired progression.",
+                ),
+            },
         ],
     },
     {

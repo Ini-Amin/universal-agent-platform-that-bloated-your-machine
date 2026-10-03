@@ -26,15 +26,16 @@ from uap.templates import (
     template_detail,
 )
 from uap.workflows.bbp import WORKFLOW_NAME as BBP_WORKFLOW_NAME
+from uap.workflows.learning import WORKFLOW_NAME as LEARNING_WORKFLOW_NAME
 from uap.workflows.research import WORKFLOW_NAME as RESEARCH_WORKFLOW_NAME
 
 #: Workflows the platform can actually execute today. A template may only map
 #: to one of these; anything else would be a template for a capability that
 #: does not exist.
-EXECUTABLE_WORKFLOW_REFS = frozenset({RESEARCH_WORKFLOW_NAME, BBP_WORKFLOW_NAME})
+EXECUTABLE_WORKFLOW_REFS = frozenset({RESEARCH_WORKFLOW_NAME, BBP_WORKFLOW_NAME, LEARNING_WORKFLOW_NAME})
 
 #: Domains the server treats as executable (mirrors ``_EXECUTABLE`` in app.py).
-EXECUTABLE_DOMAINS = frozenset({Domain.RESEARCH.value, Domain.BBP.value})
+EXECUTABLE_DOMAINS = frozenset({Domain.RESEARCH.value, Domain.BBP.value, Domain.LEARNING.value})
 
 GROUP_FIELDS = {"moduleName", "category", "title", "icon", "type", "templates"}
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from uap.contracts.models import Domain, TaskSpec
 
-__all__ = ["DOMAIN_WORKFLOW_MAP", "Router", "RoutingDecision", "WorkflowRegistry"]
+__all__ = ["DOMAIN_WORKFLOW_MAP", "EXECUTABLE_DOMAINS", "Router", "RoutingDecision", "WorkflowRegistry"]
 
 
 # The entire routing table. Adding a domain means adding one line here and
@@ -23,6 +23,13 @@ DOMAIN_WORKFLOW_MAP: dict[str, str] = {
     Domain.DATA: "DataWorkflow",
     Domain.UNKNOWN: "Clarification",
 }
+
+#: Domains with executable workflows.
+EXECUTABLE_DOMAINS: frozenset[Domain] = frozenset({
+    Domain.RESEARCH,
+    Domain.BBP,
+    Domain.LEARNING,
+})
 
 _CLARIFICATION = "Clarification"
 

@@ -225,6 +225,7 @@ _DOMAIN_KEYWORDS: tuple[tuple[str, Domain], ...] = (
     ("analisis", Domain.RESEARCH),
     ("study", Domain.RESEARCH),
     ("studi", Domain.RESEARCH),
+    ("learn", Domain.LEARNING),
     # coding
     ("coding", Domain.CODING),
     ("ngoding", Domain.CODING),
