@@ -118,26 +118,21 @@
       <!-- Runtime environment (240x91) -->
       <div class="runtime-environment">
         <div class="env-status-row">
-          <div class="env-status-indicator">
+          <div class="env-status-indicator" role="status">
             <span class="status-dot"></span>
             <span class="status-label">Sandbox connected</span>
           </div>
-          <button class="env-settings-btn" title="Environment settings" aria-label="Environment settings">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M2 10L10 2M10 2H5M10 2V7" stroke="#9AA1B4" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <button id="btn-check-connection" class="env-settings-btn" type="button" title="Check connection" aria-label="Check connection">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M10 6A4 4 0 1 1 8.8 3.2M10 1.8V4H7.8" stroke="#9AA1B4" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
         </div>
-        <div class="account-pill" role="button" tabindex="0" title="Account profile">
+        <div class="account-pill" title="Single-operator local workspace (no accounts)">
           <div class="account-avatar">OP</div>
           <div class="account-info">
             <span class="account-name">Operator</span>
             <span class="account-role">Local workspace</span>
-          </div>
-          <div class="account-chevrons">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M3.5 4.5L6 2L8.5 4.5M3.5 7.5L6 10L8.5 7.5" stroke="#9AA1B4" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
           </div>
         </div>
       </div>
@@ -201,11 +196,11 @@
             </svg>
             <span>Run again</span>
           </button>
-          <button id="btn-more-options" class="btn btn-icon-only" title="More options" aria-label="More options">
-            <svg width="14" height="14" viewBox="0 0 12 12" fill="none">
-              <circle cx="2" cy="6" r="1.2" fill="#9AA1B4"/>
-              <circle cx="6" cy="6" r="1.2" fill="#9AA1B4"/>
-              <circle cx="10" cy="6" r="1.2" fill="#9AA1B4"/>
+          <button id="btn-help" class="btn btn-icon-only" type="button" title="How to use the canvas" aria-label="How to use the canvas">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="6" stroke="#9AA1B4" stroke-width="1.4"/>
+              <path d="M6.2 6.3a1.9 1.9 0 1 1 2.7 1.7c-.6.3-.9.7-.9 1.3" stroke="#9AA1B4" stroke-width="1.4" stroke-linecap="round"/>
+              <circle cx="8" cy="11.6" r="0.9" fill="#9AA1B4"/>
             </svg>
           </button>
           <span id="ws-status-badge" class="badge badge-idle" style="display: none;" title="Live execution stream connection">stream: idle</span>
@@ -250,7 +245,7 @@
               </svg>
               <span>Add surface</span>
             </button>
-            <button id="btn-share-canvas" class="btn btn-share" type="button" title="Share session">
+          <button id="btn-share-canvas" class="btn btn-share" type="button" title="Copy a link to this page">
               <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                 <circle cx="4" cy="8" r="2.5" stroke="#E2E6F0" stroke-width="1.3"/>
                 <circle cx="12" cy="4" r="2.5" stroke="#E2E6F0" stroke-width="1.3"/>
@@ -1131,17 +1126,57 @@
         btnHistory?.focus();
       }
     });
-    document.getElementById('btn-more-options')?.addEventListener('click', () => {
-      showToast({ kind: 'info', title: 'Workspace Settings', message: 'Autosave: Enabled · Runtime: Local v1.0 · Split mode: 2' });
-    });
+    // Reopens the usage guide, which "Don't show again" otherwise hides for
+    // good. (This button used to toast settings that did not exist.)
+    document.getElementById('btn-help')?.addEventListener('click', () => stage.showGuide());
+    // Only claim success when the clipboard write actually succeeded.
     document.getElementById('btn-share-canvas')?.addEventListener('click', async () => {
       try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(window.location.href);
-        }
-      } catch (_e) {}
-      showToast({ kind: 'info', title: 'Share Link Copied', message: 'Workspace link copied to clipboard.' });
+        await navigator.clipboard.writeText(window.location.href);
+      } catch (_e) {
+        showToast({ kind: 'error', title: 'Could not copy', message: `Copy this address manually: ${window.location.href}` });
+        return;
+      }
+      const local = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+      showToast({
+        kind: 'info',
+        title: 'Link copied',
+        message: local ? 'It points at localhost, so it only opens on this machine.' : 'Link to this page copied.',
+      });
     });
+
+    // The status label was static markup, so it kept saying "Sandbox connected"
+    // with the server stopped.
+    const envIndicator = document.querySelector('.env-status-indicator');
+    async function checkConnection(announce = false) {
+      const started = performance.now();
+      let ok = false;
+      let detail = '';
+      try {
+        // HEAD on the app shell: answered even when API auth is on.
+        const res = await fetch('/', { method: 'HEAD', cache: 'no-store' });
+        ok = res.ok;
+        detail = `HTTP ${res.status} in ${Math.round(performance.now() - started)} ms`;
+      } catch (err) {
+        detail = (err && err.message) || 'network error';
+      }
+      if (envIndicator) {
+        envIndicator.classList.toggle('is-down', !ok);
+        const label = envIndicator.querySelector('.status-label');
+        if (label) label.textContent = ok ? 'Sandbox connected' : 'Sandbox unreachable';
+        envIndicator.title = `Last checked ${new Date().toLocaleTimeString()} — ${detail}`;
+      }
+      if (announce) {
+        showToast(ok
+          ? { kind: 'info', title: 'Connected', message: `Server reachable (${detail}).` }
+          : { kind: 'error', title: 'Server unreachable', message: `${detail}. Is the server still running?` });
+      }
+    }
+    document.getElementById('btn-check-connection')?.addEventListener('click', () => checkConnection(true));
+    setInterval(() => { if (!document.hidden) checkConnection(); }, 15000);
+    window.addEventListener('online', () => checkConnection());
+    window.addEventListener('offline', () => checkConnection());
+    checkConnection();
 
     // DEF-11: Global Ctrl+S and Ctrl+Enter keyboard listeners
     document.addEventListener('keydown', (e) => {
