@@ -16,13 +16,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg17
         env:
-          POSTGRES_USER: uap
+          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: uap_local_dev
-          POSTGRES_DB: uap
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U uap"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -38,10 +38,18 @@ jobs:
           python-version: '3.15'
           allow-prereleases: true
 
-      - name: Create test database
+      - name: Create least-privilege app role and databases
         run: |
-          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U uap -d uap \
-            -c 'CREATE DATABASE uap_test;'
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U postgres -d postgres \
+            -c "CREATE ROLE uap LOGIN PASSWORD 'uap_local_dev' NOSUPERUSER NOCREATEDB;"
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U postgres -d postgres \
+            -c 'CREATE DATABASE uap OWNER uap;'
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U postgres -d postgres \
+            -c 'CREATE DATABASE uap_test OWNER uap;'
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U postgres -d uap \
+            -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+          PGPASSWORD=uap_local_dev psql -h 127.0.0.1 -U postgres -d uap_test \
+            -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 
       - name: Install package (fresh install must succeed)
         run: |
