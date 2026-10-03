@@ -214,3 +214,22 @@ def test_history_lists_real_runs_and_reload_opens_the_latest(client: TestClient)
     assert "tasks[tasks.length - 1].task_id" in html
     assert "tasks[0].task_id" not in html
 
+
+def test_chrome_controls_do_not_make_things_up(client: TestClient) -> None:
+    html = client.get("/").text
+    # The status label was static markup: "Sandbox connected" with the server down.
+    assert "async function checkConnection(" in html
+    assert "Sandbox unreachable" in html
+    # Invented settings toast, and a share toast that claimed success unconditionally.
+    assert "Autosave: Enabled" not in html
+    assert "Runtime: Local v1.0" not in html
+    assert "Workspace link copied to clipboard." not in html
+    assert "Could not copy" in html
+    # The account pill and gear advertised menus that did not exist.
+    assert 'role="button" tabindex="0" title="Account profile"' not in html
+    assert "account-chevrons" not in html
+    # "Don't show again" was a one-way door; the help button reopens the guide.
+    assert 'id="btn-help"' in html
+    assert "stage.showGuide()" in html
+    assert "showGuide:" in client.get("/js/stage.js").text
+

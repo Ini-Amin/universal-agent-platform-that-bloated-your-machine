@@ -3355,6 +3355,13 @@ export function createStage(containerEl, options = {}) {
       removeStorage(GUIDE_DISMISS_KEY);
       updateEmptyState();
     },
+    // Show the guide on demand, over open cards and after "Don't show again".
+    showGuide: () => {
+      removeStorage(GUIDE_DISMISS_KEY);
+      guideSuppressed = false;
+      if (guideEl) guideEl.style.display = 'flex';
+      refreshRegionEmptiness();
+    },
     arrangeCards,
   };
   containerEl.__stage = api;

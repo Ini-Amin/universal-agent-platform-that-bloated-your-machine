@@ -263,6 +263,9 @@ body {
   font-size: 12px;
   color: var(--ok);
 }
+/* The server stopped answering (checkConnection in index.html). */
+.env-status-indicator.is-down .status-dot { background: var(--err); }
+.env-status-indicator.is-down .status-label { color: var(--err); }
 
 .env-settings-btn {
   background: transparent;
@@ -296,7 +299,7 @@ body {
   padding: 0 8px;
   gap: 10px;
   box-sizing: border-box;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
 }
 
