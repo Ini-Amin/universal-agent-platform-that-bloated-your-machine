@@ -1127,9 +1127,9 @@
       }
       itemsEl.innerHTML = items
         .map((it) => `
-          <div class="sidebar-resource-item" role="button" tabindex="0" data-res-type="${escapeHtml(it.type)}" data-res-key="${escapeHtml(it.key)}">
+          <div class="sidebar-resource-item" role="button" tabindex="0" data-res-type="${escapeHtml(it.type)}" data-res-key="${escapeHtml(it.key)}" title="${escapeHtml(it.name)}">
             <span class="sidebar-item-icon">${it.icon}</span>
-            <span class="sidebar-item-name">${escapeHtml(it.name)}</span>
+            <span class="sidebar-item-name" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</span>
             ${it.badge ? `<span class="sidebar-item-badge">${escapeHtml(it.badge)}</span>` : ''}
             ${it.deletable ? `<button class="sidebar-item-delete" data-delete-id="${escapeHtml(it.key)}" title="Delete this knowledge item" aria-label="Delete this knowledge item" type="button">✕</button>` : ''}
           </div>
@@ -2295,6 +2295,12 @@
       if (badge) {
         badge.textContent = state.status;
         badge.className = `badge badge-${state.status}`;
+      }
+      // The colour of the run light must follow the run, not stay green: a
+      // failed run showing a healthy teal dot contradicted the badge beside it.
+      const dot = document.querySelector('.run-status-indicator .status-dot');
+      if (dot) {
+        dot.className = `status-dot status-dot-${state.status}`;
       }
       // Terminal states: re-fetch the graph so the canvas shows the FINAL
       // per-node statuses (the durable slice records them in PG; the initial
