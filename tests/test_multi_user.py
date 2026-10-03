@@ -395,3 +395,78 @@ def test_backward_compat_no_token_no_users(
         with admin.begin() as conn:
             conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin.dispose()
+
+
+def test_knowledge_delete_is_auth_gated_and_viewer_forbidden(
+    app: FastAPI, session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DELETE /api/knowledge/{id}: viewer 403, writer 200, unknown 404.
+
+    Also proves the dedupe route collapses the identical-statement duplicates
+    that the bug report found (100 rows, one claim).
+    """
+    monkeypatch.setenv("UAP_API_TOKEN", BOOTSTRAP_TOKEN)
+    client = TestClient(app)
+    admin_auth = {"Authorization": f"Bearer {BOOTSTRAP_TOKEN}"}
+
+    # Seed three identical claims directly (the shape of the reported bug).
+    from uap.knowledge import HashingEmbedder, KnowledgeItem, KnowledgeStore, Provenance
+    from uap.contracts import utc_now
+
+    def _mk(statement: str):
+        return KnowledgeItem(
+            statement=statement,
+            domain="research",
+            provenance=[
+                Provenance(
+                    source_kind="artifact",
+                    source_ref="artifact-1",
+                    extracted_by="slice",
+                    extracted_at=utc_now(),
+                )
+            ],
+        )
+
+    ids: list[str] = []
+    with session_factory() as session:
+        store = KnowledgeStore(session)
+        for _ in range(3):
+            ids.append(store.add(_mk("Python is a programming language"), HashingEmbedder()).knowledge_id)
+        session.commit()
+
+    v_resp = client.post("/api/users", json={"name": "Viewer K", "role": "viewer"}, headers=admin_auth)
+    viewer_auth = {"Authorization": f"Bearer {v_resp.json()['api_key']}"}
+
+    # Viewer cannot delete.
+    forbidden = client.delete(f"/api/knowledge/{ids[0]}", headers=viewer_auth)
+    assert forbidden.status_code == 403
+
+    # Viewer cannot dedupe.
+    assert client.post("/api/knowledge/dedupe", headers=viewer_auth).status_code == 403
+
+    # Writer can dedupe: 3 identical claims collapse to 1.
+    dedupe = client.post("/api/knowledge/dedupe", headers=admin_auth)
+    assert dedupe.status_code == 200
+    assert dedupe.json()["removed"] == 2
+
+    # One survivor remains in the store (GET lists VERIFIED only; these are
+    # PROPOSED, so read the store directly).
+    from uap.knowledge.model import KnowledgeStatus
+
+    with session_factory() as session:
+        remaining = KnowledgeStore(session).list_by_status(KnowledgeStatus.PROPOSED, limit=100)
+        assert len(remaining) == 1
+        survivor_id = remaining[0].knowledge_id
+
+    # Writer can delete the survivor.
+    deleted = client.delete(f"/api/knowledge/{survivor_id}", headers=admin_auth)
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "knowledge_id": survivor_id}
+
+    with session_factory() as session:
+        assert KnowledgeStore(session).get(survivor_id) is None
+
+    # Unknown id -> 404, not a fake success.
+    assert client.delete(
+        "/api/knowledge/00000000-0000-0000-0000-000000000000", headers=admin_auth
+    ).status_code == 404

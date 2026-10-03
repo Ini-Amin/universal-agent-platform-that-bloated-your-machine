@@ -133,7 +133,7 @@ check("one divider", document.querySelectorAll(".stage-split-divider").length ==
 check("grid has split classes", grid.classList.contains("stage-grid-split") && grid.classList.contains("stage-grid-split-2"));
 check("cards moved into region 0", Array.from(document.querySelectorAll(".stage-card"))
   .every((el) => el.parentElement === document.querySelector('.stage-region[data-region="0"]')));
-check("region labels rendered", document.querySelectorAll(".stage-region-label").length === 2);
+check("empty region hints rendered", document.querySelectorAll(".stage-region-empty").length === 2);
 check("zoom is inert in split", (stage.zoomIn(), grid.style.transform === "none"));
 check("ratio var default", grid.style.getPropertyValue("--split-x") === "0.5fr");
 

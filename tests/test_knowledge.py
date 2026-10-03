@@ -688,3 +688,97 @@ def test_alembic_has_single_head_and_knowledge_migration() -> None:
 
     migration_files = list((repo_root / "migrations" / "versions").glob("*.py"))
     assert any("knowledge" in path.name for path in migration_files)
+
+# =========================================================================== #
+# 20. delete removes the item and its children (cascade)
+# =========================================================================== #
+
+@requires_db
+def test_delete_removes_item_and_children(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        store = KnowledgeStore(session)
+        item = store.add(_item(statement="delete me"), EMBEDDER)
+
+    with session_scope(session_factory) as session:
+        assert KnowledgeStore(session).delete(item.knowledge_id) is True
+
+    with session_scope(session_factory) as session:
+        store = KnowledgeStore(session)
+        assert store.get(item.knowledge_id) is None
+        # Provenance and lifecycle events cascade with the item.
+        assert store.history(item.knowledge_id) == []
+
+
+@requires_db
+def test_delete_unknown_returns_false(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        assert KnowledgeStore(session).delete(str(uuid.uuid4())) is False
+        # A malformed id is not a crash: it is "not found".
+        assert KnowledgeStore(session).delete("not-a-uuid") is False
+
+
+# =========================================================================== #
+# 21. dedupe_by_statement collapses repeats (case/whitespace-insensitive)
+# =========================================================================== #
+
+@requires_db
+def test_dedupe_by_statement_collapses_repeats(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        store = KnowledgeStore(session)
+        first = store.add(
+            _item(statement="Python is a programming language", domain="research"),
+            EMBEDDER,
+        )
+        store.add(
+            _item(statement="python is a programming language", domain="research"),
+            EMBEDDER,
+        )
+        store.add(
+            _item(statement="  Python is a programming   language  ", domain="research"),
+            EMBEDDER,
+        )
+        # A different domain is a different claim and must survive.
+        other = store.add(
+            _item(statement="Python is a programming language", domain="bbp"), EMBEDDER
+        )
+
+    with session_scope(session_factory) as session:
+        removed = KnowledgeStore(session).dedupe_by_statement()
+        assert removed == 2  # three in 'research' collapse to one; 'bbp' untouched
+
+    with session_scope(session_factory) as session:
+        store = KnowledgeStore(session)
+        assert store.get(first.knowledge_id) is not None  # oldest kept
+        assert store.get(other.knowledge_id) is not None
+        assert len(store.list_by_status(KnowledgeStatus.PROPOSED, limit=100)) == 2
+
+
+# =========================================================================== #
+# 22. propose dedupes by default; the source of the duplicate bug
+# =========================================================================== #
+
+@requires_db
+def test_propose_dedupes_identical_claim(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        lifecycle = KnowledgeLifecycle(KnowledgeStore(session))
+        first = lifecycle.propose(_item(statement="same claim"), actor="a", embedder=EMBEDDER)
+        again = lifecycle.propose(
+            _item(statement="Same  claim"), actor="a", embedder=EMBEDDER
+        )
+        # The second proposal returns the SAME item instead of inserting a copy.
+        assert again.knowledge_id == first.knowledge_id
+
+    with session_scope(session_factory) as session:
+        rows = KnowledgeStore(session).list_by_status(KnowledgeStatus.PROPOSED, limit=100)
+        assert len(rows) == 1
+
+
+@requires_db
+def test_propose_dedupe_can_be_disabled(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        lifecycle = KnowledgeLifecycle(KnowledgeStore(session))
+        first = lifecycle.propose(_item(statement="dup claim"), actor="a", embedder=EMBEDDER)
+        second = lifecycle.propose(
+            _item(statement="dup claim"), actor="a", embedder=EMBEDDER, dedupe=False
+        )
+        assert second.knowledge_id != first.knowledge_id

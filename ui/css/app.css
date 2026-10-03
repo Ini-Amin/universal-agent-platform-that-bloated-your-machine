@@ -1685,10 +1685,13 @@ textarea:focus-visible,
 
 .node-strip-empty {
   color: var(--fg-muted);
-  font-size: 10px;
+  font-size: 12px;
   text-align: center;
-  padding: 12px 2px;
-  line-height: 1.35;
+  padding: 14px 6px;
+  line-height: 1.4;
+  /* The 84px strip wraps this to a few short lines; keep it readable rather
+     than rotated or clipped. */
+  overflow-wrap: break-word;
 }
 
 .node-chip {
@@ -1799,7 +1802,8 @@ textarea:focus-visible,
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  width: 440px;
+  width: 540px;
+  height: 440px;
   min-width: 280px;
   box-sizing: border-box;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.125);
@@ -1811,6 +1815,10 @@ textarea:focus-visible,
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
+/* One consistent default size per kind family so a row of surfaces lines up:
+   the standard card is 540x440; the two "media" surfaces are deliberately
+   larger at 580x480. (Previously markdown fell back to 440x(auto), so a row of
+   editor + terminal + note had three different heights.) */
 .stage-card[data-kind="whiteboard"],
 .stage-card[data-kind="iframe"] {
   width: 580px;
@@ -1971,7 +1979,8 @@ textarea:focus-visible,
 
 .stage-grid-split-2 .stage-card:not(.stage-card-dragged) {
   position: absolute;
-  width: 100% !important;
+  width: calc(100% - 32px) !important;
+  left: 16px !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="editor"]:not(.stage-card-dragged),
@@ -1979,14 +1988,12 @@ textarea:focus-visible,
   height: calc((100% - 24px) / 2);
   max-height: 382px;
   top: 0 !important;
-  left: 0 !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="terminal"]:not(.stage-card-dragged) {
   height: calc((100% - 24px) / 2);
   max-height: 382px;
   top: calc(50% + 12px) !important;
-  left: 0 !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="iframe"]:not(.stage-card-dragged),
@@ -1995,27 +2002,26 @@ textarea:focus-visible,
   min-height: 280px;
   max-height: 583px;
   top: 0 !important;
-  left: 0 !important;
 }
 
 .stage-grid-split-2 .stage-card[data-kind="note"]:not(.stage-card-dragged),
 .stage-grid-split-2 .stage-card[data-kind="handoff"]:not(.stage-card-dragged) {
   height: 180px;
   top: calc(100% - 180px) !important;
-  left: 0 !important;
 }
 
-.stage-region-label {
+/* A region with no cards explains itself instead of showing developer jargon
+   ("REGION 1"). It disappears as soon as a card lands (see refreshRegionEmptiness). */
+.stage-region-empty {
   position: absolute;
-  top: 6px;
-  right: 8px;
-  z-index: 1;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
   color: var(--fg-muted);
-  opacity: 0.7;
   pointer-events: none;
 }
 
@@ -3888,124 +3894,153 @@ body.stage-fullscreen .stage-card-exit-fill {
   margin-top: 6px;
 }
 
-/* --- Empty Stage Guide --- */
+/* --- Empty-canvas usage guide (replaces the old workbench card) --- */
 
-.stage-empty-state {
+.stage-guide {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 15;
   width: 90%;
-  max-width: 680px;
+  max-width: 560px;
+  max-height: calc(100% - 40px);
+  overflow: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 28px 24px;
+  padding: 20px 22px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  text-align: center;
+  align-items: flex-start;
+  text-align: left;
   pointer-events: auto;
   box-sizing: border-box;
   overflow-wrap: break-word;
 }
 
-.stage-empty-content {
+.stage-guide-head {
   display: flex;
-  flex-direction: column;
   align-items: center;
+  justify-content: space-between;
   width: 100%;
+  margin-bottom: 8px;
 }
 
-.stage-empty-badge {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: var(--accent);
-  background: rgba(221, 127, 211, 0.12);
-  border: 1px solid rgba(221, 127, 211, 0.3);
-  padding: 3px 10px;
-  border-radius: 12px;
-  margin-bottom: 12px;
-}
-
-.stage-empty-title {
-  font-size: 18px;
+.stage-guide-title {
+  font-size: 16px;
   font-weight: 600;
   color: var(--fg);
-  margin: 0 0 8px 0;
+  margin: 0;
 }
 
-.stage-empty-desc {
-  font-size: 13px;
+.stage-guide-close {
+  background: transparent;
+  border: none;
   color: var(--fg-muted);
-  max-width: 520px;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.stage-guide-close:hover {
+  background: var(--panel-3);
+  color: var(--fg);
+}
+
+.stage-guide-lede {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin: 0 0 8px 0;
   line-height: 1.5;
-  margin: 0 0 20px 0;
 }
 
-.stage-empty-actions {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+.stage-guide-steps {
+  margin: 0 0 12px 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+.stage-guide-steps li {
+  margin-bottom: 4px;
+}
+
+.stage-guide-section {
   width: 100%;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 
-.stage-empty-tool-btn {
+.stage-guide-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.stage-guide-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+.stage-guide-list li {
+  margin-bottom: 2px;
+}
+
+.stage-guide-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  margin: 0;
+}
+
+.stage-guide-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin: 0 0 12px 0;
+  line-height: 1.5;
+}
+
+.stage-guide-actions {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 14px 10px;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.stage-guide-dismiss {
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.stage-guide-dismiss:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.stage-guide code,
+.stage-guide kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--fg);
-  cursor: pointer;
-  min-height: 72px;
-  box-sizing: border-box;
-  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
-}
-
-.stage-empty-tool-btn:hover {
-  transform: translateY(-2px);
-  border-color: var(--accent);
-  background: var(--panel-3);
-}
-
-.stage-empty-icon {
-  font-size: 22px;
-}
-
-.stage-empty-info {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.stage-empty-name {
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 4px;
+  padding: 1px 5px;
   color: var(--fg);
 }
 
-.stage-empty-sub {
-  font-size: 10px;
-  color: var(--fg-muted);
-}
-
-.stage-empty-footer {
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.stage-empty-hint strong {
-  color: var(--accent);
+.stage-guide strong {
+  color: var(--fg);
 }
 
 /* --- Editable Note View --- */

@@ -172,6 +172,16 @@ export async function getKnowledgeProvenance(knowledgeId) {
   return request(`/api/knowledge/${encodeURIComponent(knowledgeId)}/provenance`);
 }
 
+export async function deleteKnowledge(knowledgeId) {
+  return request(`/api/knowledge/${encodeURIComponent(knowledgeId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function dedupeKnowledge() {
+  return request('/api/knowledge/dedupe', { method: 'POST' });
+}
+
 // Artifacts
 export async function getTaskArtifacts(taskId) {
   return request(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);

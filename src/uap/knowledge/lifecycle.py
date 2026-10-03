@@ -80,9 +80,23 @@ class KnowledgeLifecycle:
         *,
         actor: str,
         embedder: Embedder | None = None,
+        dedupe: bool = True,
     ) -> KnowledgeItem:
-        """Persist a candidate as ``PROPOSED`` (writes the ``proposed`` event)."""
+        """Persist a candidate as ``PROPOSED`` (writes the ``proposed`` event).
 
+        When ``dedupe`` is true (the default) a claim identical to an existing
+        one in the same domain -- ignoring case and surrounding whitespace -- is
+        **not** inserted again; the existing item is returned instead. This is
+        the source-of-duplication fix: repeated runs of the same research
+        question used to append a fresh copy of the same stub claim every time
+        (846 identical rows). Set ``dedupe=False`` to force a distinct row
+        (e.g. to supersede deliberately).
+        """
+
+        if dedupe:
+            existing = self.store.find_by_statement(item.statement, item.domain)
+            if existing is not None:
+                return existing
         return self.store.add(item, embedder, actor=actor)
 
     def verify(

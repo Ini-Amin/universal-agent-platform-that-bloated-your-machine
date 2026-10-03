@@ -58,7 +58,6 @@
               </span>
               <span class="sidebar-section-title">Agents</span>
               <span class="sidebar-section-count" data-count-for="agents">0</span>
-              <button class="sidebar-section-add" title="Add Agent" aria-label="Add Agent" type="button">+</button>
             </div>
             <div class="sidebar-section-items" data-items-for="agents"></div>
           </div>
@@ -74,7 +73,6 @@
               </span>
               <span class="sidebar-section-title">Tools</span>
               <span class="sidebar-section-count" data-count-for="tools">0</span>
-              <button class="sidebar-section-add" title="Add Tool" aria-label="Add Tool" type="button">+</button>
             </div>
             <div class="sidebar-section-items" data-items-for="tools"></div>
           </div>
@@ -86,7 +84,6 @@
               <span class="sidebar-section-icon">★</span>
               <span class="sidebar-section-title">Skills</span>
               <span class="sidebar-section-count" data-count-for="skills">0</span>
-              <button class="sidebar-section-add" title="Add Skill" aria-label="Add Skill" type="button">+</button>
             </div>
             <div class="sidebar-section-items" data-items-for="skills"></div>
           </div>
@@ -98,7 +95,7 @@
               <span class="sidebar-section-icon">📖</span>
               <span class="sidebar-section-title">Knowledge</span>
               <span class="sidebar-section-count" data-count-for="knowledge">0</span>
-              <button class="sidebar-section-add" title="Add Knowledge" aria-label="Add Knowledge" type="button">+</button>
+              <button class="sidebar-section-add sidebar-section-dedupe" data-action="dedupe-knowledge" title="Remove duplicate knowledge claims" aria-label="Remove duplicate knowledge claims" type="button">Dedupe</button>
             </div>
             <div class="sidebar-section-items" data-items-for="knowledge"></div>
           </div>
@@ -110,7 +107,6 @@
               <span class="sidebar-section-icon">📦</span>
               <span class="sidebar-section-title">Artifacts</span>
               <span class="sidebar-section-count" data-count-for="artifacts">0</span>
-              <button class="sidebar-section-add" title="Add Artifact" aria-label="Add Artifact" type="button">+</button>
             </div>
             <div class="sidebar-section-items" data-items-for="artifacts"></div>
           </div>
@@ -221,7 +217,7 @@
                      aria-label="Task description" value=""
                      placeholder="What do you want to research?" />
               <button id="btn-proposal" class="btn btn-sm btn-proposal-subtle" title="Preview the workflow before running it">Preview</button>
-              <button id="btn-run-task" class="btn btn-accent" style="display: none;">Run</button>
+              <button id="btn-run-task" class="btn btn-accent" title="Run the task">Run</button>
             </div>
             <div class="task-context-subline">
               <span id="task-context-meta">Ready to run</span>
@@ -473,6 +469,8 @@
       getTools,
       getSkills,
       getKnowledge,
+      deleteKnowledge,
+      dedupeKnowledge,
       getModels,
       getMcp,
       getPolicies,
@@ -1046,9 +1044,63 @@
     document.querySelectorAll('.sidebar-section-add').forEach((addBtn) => {
       addBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        openPalette();
+        const action = addBtn.getAttribute('data-action');
+        if (action === 'dedupe-knowledge') {
+          dedupeKnowledgeClaims(addBtn);
+        }
+        // A bare `+` no longer opens the tool launcher: the five section
+        // controls were dishonest (all five opened the same palette). Sections
+        // whose resources the API cannot create have no `+` at all; Knowledge
+        // carries an explicit, labelled "Dedupe" action instead.
       });
     });
+
+    async function dedupeKnowledgeClaims(btn) {
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        const res = await dedupeKnowledge();
+        const removed = Number(res?.removed) || 0;
+        showToast({
+          kind: 'info',
+          title: 'Knowledge deduplicated',
+          message: removed > 0
+            ? `Removed ${removed} duplicate claim${removed === 1 ? '' : 's'}.`
+            : 'No duplicate claims found.',
+        });
+        await loadAccordionSection('knowledge');
+      } catch (err) {
+        showToast({
+          kind: 'error',
+          title: 'Dedupe failed',
+          message: err.message || String(err),
+        });
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    }
+
+    async function deleteKnowledgeItem(knowledgeId, statement, btn) {
+      if (btn) btn.disabled = true;
+      try {
+        await deleteKnowledge(knowledgeId);
+        showToast({
+          kind: 'info',
+          title: 'Knowledge deleted',
+          message: statement ? `Removed: ${statement}` : 'Item removed.',
+        });
+        await loadAccordionSection('knowledge');
+      } catch (err) {
+        if (btn) btn.disabled = false;
+        showToast({
+          kind: 'error',
+          title: 'Delete failed',
+          message: err.message || String(err),
+        });
+      }
+    }
     // Sidebar accordion sections show REAL registered resources. Nothing is
     // seeded: an empty section stays empty and says so, and the count reflects
     // what the API actually returned. The Figma mock's demo rows are gone.
@@ -1075,15 +1127,25 @@
             <span class="sidebar-item-icon">${it.icon}</span>
             <span class="sidebar-item-name">${escapeHtml(it.name)}</span>
             ${it.badge ? `<span class="sidebar-item-badge">${escapeHtml(it.badge)}</span>` : ''}
+            ${it.deletable ? `<button class="sidebar-item-delete" data-delete-id="${escapeHtml(it.key)}" title="Delete this knowledge item" aria-label="Delete this knowledge item" type="button">✕</button>` : ''}
           </div>
         `)
         .join('');
       itemsEl.querySelectorAll('.sidebar-resource-item').forEach((el) => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('.sidebar-item-delete')) return;
           const type = el.getAttribute('data-res-type');
           const key = el.getAttribute('data-res-key');
           const data = items.find((it) => it.type === type && it.key === key)?.raw;
           if (data) uiStore.setState({ selectedResource: { type, data } });
+        });
+      });
+      itemsEl.querySelectorAll('.sidebar-item-delete').forEach((delBtn) => {
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const id = delBtn.getAttribute('data-delete-id');
+          const item = items.find((it) => it.key === id);
+          deleteKnowledgeItem(id, item ? item.name : '', delBtn);
         });
       });
     }
@@ -1118,7 +1180,7 @@
           const rows = await getKnowledge();
           const list = (Array.isArray(rows) ? rows : []).map((k) => ({
             type: 'knowledge', key: k.knowledge_id, name: k.statement, icon: '📄',
-            badge: k.domain || '', raw: k,
+            badge: k.domain || '', raw: k, deletable: true,
           }));
           setAccordionSection(section, list, emptyText);
         } else if (name === 'artifacts') {
@@ -2152,6 +2214,8 @@
     async function executeTask(text) {
       btnRunTask.disabled = true;
       btnRunTask.textContent = 'Starting…';
+      // The usage guide has served its purpose once work is under way.
+      stage.suppressGuide?.();
 
       const wsId = uiStore.getState().activeWorkspaceId;
 

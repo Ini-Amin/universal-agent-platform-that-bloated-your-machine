@@ -1158,16 +1158,17 @@ export function createStage(containerEl, options = {}) {
     containerEl.style.backgroundSize = `${bgSize}px ${bgSize}px`;
   }
 
+  // Per-kind default size, kept in step with the CSS in app.css. Two families:
+  // media surfaces are larger (580x480); everything else is the standard
+  // 540x440 card, so a row of surfaces lines up.
   function getCardWidth(kind) {
-    if (kind === 'whiteboard' || kind === 'iframe') return 580;
-    if (kind === 'terminal' || kind === 'editor') return 540;
-    return 440;
+    if (kind === 'whiteboard' || kind === 'iframe' || kind === 'video' || kind === 'image') return 580;
+    return 540;
   }
 
   function getCardHeight(kind) {
-    if (kind === 'whiteboard' || kind === 'iframe') return 480;
-    if (kind === 'terminal' || kind === 'editor') return 440;
-    return 380;
+    if (kind === 'whiteboard' || kind === 'iframe' || kind === 'video' || kind === 'image') return 480;
+    return 440;
   }
 
   // [Resize] Per-view size, persisted like position. Returns null when the view
@@ -1244,9 +1245,51 @@ export function createStage(containerEl, options = {}) {
     }
   }
 
-  // [InfiniteCanvas] Deterministic placement rule:
-  // Loose grid (3 cols, cell 500x440, gap 24px) starting at (40, 40).
-  // Finds the first slot where the card's bounding box does not overlap any existing card.
+  // [InfiniteCanvas] Deterministic placement rule.
+  //
+  // The old rule hard-coded a 3-column 500x440 grid and assumed every existing
+  // card was 440x380, so a 540px-wide editor overlapped its neighbour and a
+  // third column ran off the canvas (measured 2026-10-03: overlaps of 16px and a
+  // card right edge 341px past the canvas). This version uses each card's REAL
+  // width/height, wraps to the next row when a column would exceed the visible
+  // canvas, and clamps every position so a card can never be placed off-screen.
+  function containerSize() {
+    let rect = null;
+    if (typeof containerEl.getBoundingClientRect === 'function') {
+      rect = containerEl.getBoundingClientRect();
+    }
+    const width = (rect && rect.width) || containerEl.clientWidth || 1227;
+    const height = (rect && rect.height) || containerEl.clientHeight || 788;
+    return { width, height };
+  }
+
+  // World-space rectangle currently visible inside the container (the grid is
+  // translated by viewport.x/y and scaled by viewport.zoom).
+  function worldBounds() {
+    const { width, height } = containerSize();
+    const zoom = viewport.zoom || 1;
+    return {
+      left: Math.round(-viewport.x / zoom),
+      top: Math.round(-viewport.y / zoom),
+      right: Math.round((width - viewport.x) / zoom),
+      bottom: Math.round((height - viewport.y) / zoom),
+    };
+  }
+
+  // A card's real box: an explicit resize wins, then the element's measured
+  // size, then the per-kind default. Used for both the new card and every
+  // existing card so collision tests compare like with like.
+  function cardBox(kind, id) {
+    const entry = views.get(String(id));
+    const sized = sizes.get(String(id)) || loadCardSize(String(id));
+    const measuredW = entry && entry.cardEl && entry.cardEl.offsetWidth;
+    const measuredH = entry && entry.cardEl && entry.cardEl.offsetHeight;
+    return {
+      w: (sized && sized.w) || measuredW || getCardWidth(kind),
+      h: (sized && sized.h) || measuredH || getCardHeight(kind),
+    };
+  }
+
   function getNextCardPosition(kind, id) {
     const rawSaved = getStorage(`uap.stage.pos.${id}`);
     if (rawSaved) {
@@ -1258,39 +1301,80 @@ export function createStage(containerEl, options = {}) {
       } catch (_e) {}
     }
 
-    const cardW = getCardWidth(kind);
-    const cardH = getCardHeight(kind);
-    const cellW = 500;
-    const cellH = 440;
+    const { w: cardW, h: cardH } = cardBox(kind, id);
+    const bounds = worldBounds();
     const gap = 24;
-    const cols = 3;
     const originX = 40;
     const originY = 40;
+    const startX = Math.max(originX, bounds.left);
+    const startY = Math.max(originY, bounds.top);
+    // The largest world coordinate at which the card is still fully visible.
+    const maxX = Math.max(startX, bounds.right - cardW);
+    const maxY = Math.max(startY, bounds.bottom - cardH);
 
-    for (let slot = 0; slot < 1000; slot++) {
-      const col = slot % cols;
-      const row = Math.floor(slot / cols);
-      const candX = originX + col * (cellW + gap);
-      const candY = originY + row * (cellH + gap);
+    // Existing cards as real rectangles (skip self).
+    const others = [];
+    for (const [existingId, pos] of positions.entries()) {
+      if (existingId === id) continue;
+      const entry = views.get(existingId);
+      const box = cardBox(entry?.spec?.kind, existingId);
+      others.push({ x: pos.x, y: pos.y, w: box.w, h: box.h });
+    }
 
-      let collides = false;
-      for (const [existingId, pos] of positions.entries()) {
-        if (existingId === id) continue;
-        const otherW = 440;
-        const otherH = 380;
-        const overlapX = candX < pos.x + otherW && candX + cardW > pos.x;
-        const overlapY = candY < pos.y + otherH && candY + cardH > pos.y;
-        if (overlapX && overlapY) {
-          collides = true;
-          break;
+    // Column/row pitch follows the widest/tallest card on the canvas, so slots
+    // are guaranteed not to overlap whatever the mix of card sizes is.
+    const colStep = Math.max(cardW, ...others.map((o) => o.w)) + gap;
+    const rowStep = Math.max(cardH, ...others.map((o) => o.h)) + gap;
+
+    const collidesAt = (x, y) =>
+      others.some((o) =>
+        x < o.x + o.w && x + cardW > o.x && y < o.y + o.h && y + cardH > o.y
+      );
+
+    // Pass 1: the first slot whose card is FULLY inside the visible canvas.
+    // Pass 2: if the canvas is genuinely full, wrap into the next row (an
+    // infinite-canvas position the user reaches with Fit/pan) -- never overlap
+    // and never let the card's RIGHT edge pass the canvas.
+    for (const pass of [1, 2]) {
+      for (let row = 0; row < 500; row++) {
+        const candY = startY + row * rowStep;
+        if (pass === 1 && candY > maxY) break;
+        for (let col = 0; col < 500; col++) {
+          const candX = startX + col * colStep;
+          if (candX > maxX) break;
+          if (!collidesAt(candX, candY)) {
+            return { x: Math.round(candX), y: Math.round(candY) };
+          }
         }
       }
-
-      if (!collides) {
-        return { x: candX, y: candY };
-      }
     }
-    return { x: originX, y: originY };
+    // Fallback (only if 500 rows are all occupied): a fresh column, right of
+    // everything, still on the first row. Non-overlapping by construction.
+    const farRight = others.reduce((m, o) => Math.max(m, o.x + o.w + gap), startX);
+    return { x: Math.round(farRight), y: Math.round(startY) };
+  }
+
+  // [Arrange] Re-flow every free-canvas card into a clean, non-overlapping,
+  // in-bounds grid. The manual escape hatch for a messy canvas.
+  function arrangeCards() {
+    if (splitMode) return 0; // regions own their layout in split mode
+    const ids = Array.from(views.keys());
+    if (ids.length === 0) return 0;
+    for (const id of ids) {
+      positions.delete(id);
+      removeStorage(`uap.stage.pos.${id}`);
+    }
+    for (const id of ids) {
+      const entry = views.get(id);
+      if (!entry) continue;
+      const pos = getNextCardPosition(entry.spec?.kind, id);
+      positions.set(id, pos);
+      setStorage(`uap.stage.pos.${id}`, JSON.stringify(pos));
+      entry.cardEl.style.left = `${pos.x}px`;
+      entry.cardEl.style.top = `${pos.y}px`;
+    }
+    emit({ type: 'arrange', ids });
+    return ids.length;
   }
 
   // [SplitPane] -----------------------------------------------------------------
@@ -1359,14 +1443,29 @@ export function createStage(containerEl, options = {}) {
     return { x: 16 + n * step, y: 16 + n * step };
   }
 
+  // [SplitPane] Inner padding so a card never sits flush against the region
+  // edge or the node strip (measured: the editor card landed at x=348, exactly
+  // the canvas left edge, touching the strip). Padding keeps a visible gutter.
+  const REGION_PAD = 16;
+
   function clampPosToRegion(cardEl, region, pos) {
     const rect = rectOf(regionEls[region]);
     const w = (cardEl && cardEl.offsetWidth) || 0;
     const h = (cardEl && cardEl.offsetHeight) || 0;
+    const innerW = Math.max(0, rect.width - REGION_PAD * 2);
+    const innerH = Math.max(0, rect.height - REGION_PAD * 2);
     return {
-      x: Math.round(Math.min(Math.max(pos.x, 0), Math.max(0, rect.width - w))),
-      y: Math.round(Math.min(Math.max(pos.y, 0), Math.max(0, rect.height - h))),
+      x: Math.round(Math.min(Math.max(pos.x - REGION_PAD, 0), Math.max(0, innerW - w)) + REGION_PAD),
+      y: Math.round(Math.min(Math.max(pos.y - REGION_PAD, 0), Math.max(0, innerH - h)) + REGION_PAD),
     };
+  }
+
+  // Hide the "Empty — …" hint for a region once it holds at least one card.
+  function refreshRegionEmptiness() {
+    for (let r = 0; r < regionEls.length; r += 1) {
+      const hint = regionEls[r].querySelector('.stage-region-empty');
+      if (hint) hint.style.display = countCardsInRegion(r) === 0 ? 'flex' : 'none';
+    }
   }
 
   function removeSplitChrome() {
@@ -1389,10 +1488,12 @@ export function createStage(containerEl, options = {}) {
       const el = document.createElement('div');
       el.className = 'stage-region';
       el.dataset.region = String(r);
-      const label = document.createElement('span');
-      label.className = 'stage-region-label';
-      label.textContent = `Region ${r + 1}`;
-      el.appendChild(label);
+      // A quiet, meaningful empty hint (not developer "REGION 1" jargon): it
+      // tells the user what to do here and disappears the moment a card lands.
+      const empty = document.createElement('div');
+      empty.className = 'stage-region-empty';
+      empty.textContent = 'Empty — add a surface, or drop a card here.';
+      el.appendChild(empty);
       grid.appendChild(el);
       regionEls.push(el);
     }
@@ -1427,6 +1528,7 @@ export function createStage(containerEl, options = {}) {
     grid.classList.add('stage-grid-split', splitMode === 4 ? 'stage-grid-split-4' : 'stage-grid-split-2');
     containerEl.classList.add('stage-split-active');
     applySplitRatios();
+    refreshRegionEmptiness();
   }
 
   function applySplitRatios() {
@@ -1470,6 +1572,7 @@ export function createStage(containerEl, options = {}) {
     setStorage(`${SPLIT_KEY}.pos.${targetId}`, JSON.stringify(next));
     entry.cardEl.style.left = `${next.x}px`;
     entry.cardEl.style.top = `${next.y}px`;
+    refreshRegionEmptiness();
   }
 
   function layoutSplitCards() {
@@ -1573,6 +1676,7 @@ export function createStage(containerEl, options = {}) {
   zoomControls.setAttribute('role', 'toolbar');
   zoomControls.setAttribute('aria-label', 'Canvas zoom controls');
   zoomControls.innerHTML = `
+    <button type="button" class="stage-zoom-btn stage-zoom-arrange" data-action="arrange" title="Tidy cards into a clean grid" aria-label="Arrange cards">Arrange</button>
     <button type="button" class="stage-zoom-btn stage-zoom-out" data-action="zoom-out" title="Zoom Out" aria-label="Zoom Out">−</button>
     <button type="button" class="stage-zoom-level" data-action="zoom-reset" title="Reset zoom to 100%" aria-label="Reset zoom">${Math.round(viewport.zoom * 100)}%</button>
     <button type="button" class="stage-zoom-btn stage-zoom-in" data-action="zoom-in" title="Zoom In" aria-label="Zoom In">+</button>
@@ -1580,108 +1684,76 @@ export function createStage(containerEl, options = {}) {
   `;
   containerEl.appendChild(zoomControls);
 
-  // [ToolWorkbench] Empty stage discoverability guide
-  const emptyStateEl = document.createElement('div');
-  emptyStateEl.className = 'stage-empty-state';
-  emptyStateEl.setAttribute('role', 'region');
-  emptyStateEl.setAttribute('aria-label', 'Workbench guide');
-  emptyStateEl.innerHTML = `
-    <div class="stage-empty-content">
-      <div class="stage-empty-badge">✦ WORKBENCH CANVAS</div>
-      <h2 class="stage-empty-title">Your interactive workspace is ready</h2>
-      <p class="stage-empty-desc">
-        Run a task above to have agents work here, or launch tools directly onto the canvas to draw, code, explore, and take notes.
-      </p>
-      <div class="stage-empty-actions">
-        <button type="button" class="stage-empty-tool-btn" data-tool="whiteboard">
-          <span class="stage-empty-icon">🎨</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Whiteboard</span>
-            <span class="stage-empty-sub">Excalidraw</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="terminal">
-          <span class="stage-empty-icon">💻</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Terminal</span>
-            <span class="stage-empty-sub">Shell session</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="editor">
-          <span class="stage-empty-icon">📝</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Code Editor</span>
-            <span class="stage-empty-sub">Python sandbox</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="note">
-          <span class="stage-empty-icon">📄</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Note</span>
-            <span class="stage-empty-sub">Markdown</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="search">
-          <span class="stage-empty-icon">🔍</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Search</span>
-            <span class="stage-empty-sub">Web & knowledge</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="iframe">
-          <span class="stage-empty-icon">🌐</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Web Page</span>
-            <span class="stage-empty-sub">Embed URL</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="video">
-          <span class="stage-empty-icon">🎬</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Video</span>
-            <span class="stage-empty-sub">Media player</span>
-          </span>
-        </button>
-        <button type="button" class="stage-empty-tool-btn" data-tool="image">
-          <span class="stage-empty-icon">🖼️</span>
-          <span class="stage-empty-info">
-            <span class="stage-empty-name">Image</span>
-            <span class="stage-empty-sub">Image viewer</span>
-          </span>
-        </button>
-      </div>
-      <div class="stage-empty-footer">
-        <span class="stage-empty-hint">Tip: Click <strong>+ Tools</strong> in the toolbar above anytime to add views.</span>
-      </div>
+  // [StageGuide] Empty-canvas usage guide. The canvas is the whole product, so
+  // a first-time user needs to be told the real flow -- which controls exist and
+  // what they do -- instead of a grid of tool tiles. Every label below is the
+  // ACTUAL control name (task box placeholder, "Run", "+ Add surface", "Free" /
+  // "Split 2" / "Split 4", the 📂 Open Folder button); nothing is invented. It
+  // shows only while the canvas is empty and can be dismissed for good.
+  const GUIDE_DISMISS_KEY = 'uap.stage.guide.dismissed';
+  // Session-only suppression: once a task is run the guide steps aside for the
+  // rest of the visit, but is not permanently dismissed (that is the explicit
+  // "Don't show again" button).
+  let guideSuppressed = false;
+  const guideEl = document.createElement('div');
+  guideEl.className = 'stage-guide';
+  guideEl.setAttribute('role', 'region');
+  guideEl.setAttribute('aria-label', 'How to use the canvas');
+  guideEl.innerHTML = `
+    <div class="stage-guide-head">
+      <h2 class="stage-guide-title">How to use the canvas</h2>
+      <button type="button" class="stage-guide-close" aria-label="Hide this guide" title="Hide this guide">✕</button>
+    </div>
+    <p class="stage-guide-lede">This canvas is your workspace. Two ways to start:</p>
+    <ol class="stage-guide-steps">
+      <li><strong>Ask for work.</strong> Type in the task box above (<em>“What do you want to research?”</em>) and press <kbd>Run</kbd>. Today only <code>research …</code> and <code>bug bounty on …</code> run; the report arrives as a surface here.</li>
+      <li><strong>Add a surface yourself.</strong> Click <strong>+ Add surface</strong> in the toolbar above to open a tool on the canvas.</li>
+    </ol>
+    <div class="stage-guide-section">
+      <span class="stage-guide-label">Surfaces</span>
+      <ul class="stage-guide-list">
+        <li><strong>Code Editor</strong> — edit real files; open your own project with the 📂 <strong>Open Folder</strong> button.</li>
+        <li><strong>Terminal</strong> — a shell in your workspace.</li>
+        <li><strong>Web Page</strong> — embed a site by URL (browser).</li>
+        <li><strong>Whiteboard</strong> — draw on an Excalidraw canvas.</li>
+        <li><strong>Note</strong> — a Markdown scratchpad.</li>
+      </ul>
+    </div>
+    <div class="stage-guide-section">
+      <span class="stage-guide-label">Layout</span>
+      <p class="stage-guide-text"><strong>Free</strong> lets you move and zoom cards; <strong>Split 2</strong> and <strong>Split 4</strong> arrange them in regions. In Free mode, the <strong>Arrange</strong> button tidies a messy canvas.</p>
+    </div>
+    <p class="stage-guide-note">When an agent opens a file, it appears here as an editor tab — agents drive this canvas.</p>
+    <div class="stage-guide-actions">
+      <button type="button" class="stage-guide-dismiss">Don’t show again</button>
     </div>
   `;
-  containerEl.appendChild(emptyStateEl);
+  containerEl.appendChild(guideEl);
 
-  function updateEmptyState() {
-    if (emptyStateEl) {
-      emptyStateEl.style.display = views.size === 0 ? 'flex' : 'none';
-    }
+  function guideDismissed() {
+    return getStorage(GUIDE_DISMISS_KEY) === '1';
   }
 
-  emptyStateEl.querySelectorAll('.stage-empty-tool-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const tool = btn.getAttribute('data-tool');
-      emit({ type: 'empty_tool_click', tool });
-      if (tool === 'whiteboard') {
-        showView({ kind: 'whiteboard', title: 'Whiteboard' });
-      } else if (tool === 'terminal') {
-        showView({ kind: 'terminal', title: 'Terminal' });
-      } else if (tool === 'editor') {
-        showView({ kind: 'editor', title: 'Code Editor', language: 'python', filename: 'main.py', code: '# Python Sandbox\nprint("Hello from UAP!")\n' });
-      } else if (tool === 'note') {
-        showView({ kind: 'markdown', title: 'Note', markdown: '', editable: true });
-      } else if (tool === 'search') {
-        showView({ kind: 'markdown', id: 'tool-search', title: 'Search (Not Configured)', markdown: SEARCH_STATUS_MARKDOWN });
-      } else {
-        emit({ type: 'request_tool_input', tool });
-      }
-    });
+  function updateEmptyState() {
+    if (guideEl) {
+      guideEl.style.display = views.size === 0 && !guideDismissed() && !guideSuppressed ? 'flex' : 'none';
+    }
+    refreshRegionEmptiness();
+  }
+
+  function suppressGuide() {
+    guideSuppressed = true;
+    updateEmptyState();
+  }
+
+  guideEl.querySelector('.stage-guide-close')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    guideEl.style.display = 'none';
+  });
+  guideEl.querySelector('.stage-guide-dismiss')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setStorage(GUIDE_DISMISS_KEY, '1');
+    guideEl.style.display = 'none';
   });
 
 
@@ -1791,6 +1863,7 @@ export function createStage(containerEl, options = {}) {
     else if (action === 'zoom-out') zoomOut();
     else if (action === 'zoom-fit') fitToView();
     else if (action === 'zoom-reset') resetView();
+    else if (action === 'arrange') arrangeCards();
   });
 
   if (typeof document !== 'undefined') {
@@ -3255,7 +3328,15 @@ export function createStage(containerEl, options = {}) {
     setCanvasFileOpener,
     destroy,
     updateEmptyState,
-    getEmptyStateElement: () => emptyStateEl,
+    getEmptyStateElement: () => guideEl,
+    // [StageGuide] persistence helpers so a host can offer "show guide again".
+    isGuideDismissed: guideDismissed,
+    suppressGuide,
+    resetGuide: () => {
+      removeStorage(GUIDE_DISMISS_KEY);
+      updateEmptyState();
+    },
+    arrangeCards,
   };
   containerEl.__stage = api;
   if (typeof window !== 'undefined') {

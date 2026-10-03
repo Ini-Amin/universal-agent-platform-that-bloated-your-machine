@@ -3078,6 +3078,71 @@ def create_app(
                 level=logging.WARNING,
             )
             return []
+    @app.delete("/api/knowledge/{knowledge_id}")
+    async def delete_knowledge(
+        request: Request, knowledge_id: str
+    ) -> dict[str, Any]:
+        """Delete one knowledge item (and its provenance/events).
+
+        Authorization: behind the app-level token gate, and a **viewer is
+        refused with 403** -- deleting curated knowledge is a write, not a
+        read. Returns 404 for an unknown id rather than pretending success.
+        """
+
+        _require_knowledge_writer(
+            request, detail="forbidden: viewers cannot delete knowledge items"
+        )
+        try:
+            from uap.db.engine import session_scope
+            from uap.knowledge.store import KnowledgeStore
+
+            with session_scope() as session:
+                removed = KnowledgeStore(session).delete(knowledge_id)
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to delete knowledge item",
+                level=logging.WARNING,
+                knowledge_id=knowledge_id,
+            )
+            raise HTTPException(
+                status_code=503, detail="knowledge store unavailable"
+            ) from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="unknown knowledge item")
+        return {"deleted": True, "knowledge_id": knowledge_id}
+
+    @app.post("/api/knowledge/dedupe")
+    async def dedupe_knowledge(request: Request) -> dict[str, Any]:
+        """Collapse repeated claims (same statement + domain) to one item each.
+
+        The cleanup counterpart to the insert-time dedupe in
+        :meth:`KnowledgeLifecycle.propose`. Deletes the duplicates and reports
+        how many were removed. Viewers are refused with 403.
+        """
+
+        _require_knowledge_writer(
+            request, detail="forbidden: viewers cannot modify knowledge items"
+        )
+        try:
+            from uap.db.engine import session_scope
+            from uap.knowledge.store import KnowledgeStore
+
+            with session_scope() as session:
+                removed = KnowledgeStore(session).dedupe_by_statement()
+        except Exception as exc:
+            log_swallowed_exception(
+                logger,
+                exc,
+                "failed to deduplicate knowledge items",
+                level=logging.WARNING,
+            )
+            raise HTTPException(
+                status_code=503, detail="knowledge store unavailable"
+            ) from exc
+        return {"removed": removed}
+
     @app.get("/api/knowledge/{knowledge_id}/provenance")
     async def get_knowledge_provenance(knowledge_id: str) -> dict[str, Any]:
         try:
@@ -3298,6 +3363,24 @@ def create_app(
         detail: str = "forbidden: viewers cannot open files in the editor",
     ) -> None:
         """Auth gate for editor side effects: viewers are refused."""
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403,
+                detail=detail,
+            )
+
+    def _require_knowledge_writer(
+        request: Request,
+        detail: str = "forbidden: viewers cannot modify knowledge items",
+    ) -> None:
+        """Auth gate for knowledge writes (delete/dedupe): viewers are refused.
+
+        Mirrors :func:`_require_editor_writer`: with auth disabled there is no
+        identity and the local-first single user may write; with auth on, a
+        viewer is 403 and admin/member pass (the app-level token gate already
+        rejected an anonymous caller with 401).
+        """
         identity = get_current_identity(request)
         if identity is not None and identity.role == "viewer":
             raise HTTPException(

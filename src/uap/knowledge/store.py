@@ -39,6 +39,16 @@ __all__ = ["FALLBACK_COSINE_DISTANCE", "KnowledgeStore"]
 #: vector was available to measure against".
 FALLBACK_COSINE_DISTANCE = 1.0
 
+def _normalize_statement(statement: str) -> str:
+    """Casefold + collapse whitespace so "Python ..." == "python ...".
+
+    The duplicate-detection key. Two claims that differ only by case or
+    surrounding/embedded whitespace are the same claim; the caller's exact
+    spelling is what gets stored.
+    """
+
+    return " ".join(str(statement or "").split()).casefold()
+
 class KnowledgeStore:
     """Typed persistence for knowledge items, provenance and lifecycle events."""
 
@@ -158,6 +168,68 @@ class KnowledgeStore:
         self._session.flush()
         return int(result.rowcount or 0)
 
+    def delete(self, knowledge_id: str) -> bool:
+        """Delete one item and its provenance/events (cascade). ``False`` if unknown.
+
+        The item's child rows are removed by the ``ON DELETE CASCADE`` foreign
+        keys (section 15: provenance never outlives its item). Returns whether a
+        row was actually removed so the caller can answer 404 honestly.
+        """
+
+        try:
+            key = uuid.UUID(knowledge_id)
+        except (ValueError, AttributeError, TypeError):
+            return False
+        result = self._session.execute(
+            delete(KnowledgeItemRow).where(KnowledgeItemRow.id == key)
+        )
+        self._session.flush()
+        return bool(result.rowcount)
+
+    def dedupe_by_statement(self, *, keep: str = "oldest") -> int:
+        """Collapse items that repeat the same claim in the same domain.
+
+        Two items are duplicates when their ``statement`` matches
+        case-insensitively (surrounding whitespace ignored) *and* they share a
+        ``domain``. One item per group survives -- the ``oldest`` (default) or
+        ``newest`` by ``created_at`` -- and the rest are deleted, their
+        provenance/event rows cascading with them. Returns the number removed.
+
+        This is the cleanup half of the duplicate-knowledge fix; the prevention
+        half is the caller refusing to insert a claim that already exists (see
+        :meth:`find_by_statement`).
+        """
+
+        rows = list(
+            self._session.execute(
+                select(
+                    KnowledgeItemRow.id,
+                    KnowledgeItemRow.statement,
+                    KnowledgeItemRow.domain,
+                    KnowledgeItemRow.created_at,
+                ).order_by(
+                    KnowledgeItemRow.created_at.asc(), KnowledgeItemRow.id.asc()
+                )
+            ).all()
+        )
+        winner: dict[tuple[str, str], uuid.UUID] = {}
+        for row_id, statement, domain, _created in rows:
+            key = (str(domain), _normalize_statement(statement))
+            if key not in winner:
+                winner[key] = row_id
+            elif keep == "newest":
+                winner[key] = row_id
+        # Everything not selected as the winner is a duplicate.
+        losers = [row_id for row_id, statement, domain, _c in rows
+                  if winner[(str(domain), _normalize_statement(statement))] != row_id]
+        if not losers:
+            return 0
+        self._session.execute(
+            delete(KnowledgeItemRow).where(KnowledgeItemRow.id.in_(losers))
+        )
+        self._session.flush()
+        return len(losers)
+
     # -- read --------------------------------------------------------------- #
 
     def get(self, knowledge_id: str) -> KnowledgeItem | None:
@@ -165,6 +237,29 @@ class KnowledgeStore:
 
         row = self._session.get(KnowledgeItemRow, uuid.UUID(knowledge_id))
         return None if row is None else self._row_to_item(row)
+
+    def find_by_statement(
+        self, statement: str, domain: str | None = None
+    ) -> KnowledgeItem | None:
+        """Return an existing item with the same claim (and domain), or ``None``.
+
+        The comparison is case-insensitive and whitespace-normalised, matching
+        :meth:`dedupe_by_statement`. Callers use this to refuse a duplicate
+        insert instead of creating one, which is the source of the duplication
+        the cleanup removes.
+        """
+
+        normalized = _normalize_statement(statement)
+        if not normalized:
+            return None
+        stmt = select(KnowledgeItemRow)
+        if domain is not None:
+            stmt = stmt.where(KnowledgeItemRow.domain == domain)
+        stmt = stmt.order_by(KnowledgeItemRow.created_at.asc())
+        for row in self._session.execute(stmt).scalars():
+            if _normalize_statement(row.statement) == normalized:
+                return self._row_to_item(row)
+        return None
 
     def search(
         self,
