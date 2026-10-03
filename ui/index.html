@@ -302,7 +302,8 @@
     import { canvasStore, executionStore, eventStore, uiStore } from './js/state.js';
     import { createUndoStack } from './js/undo.js';
     import { initGraphCanvas } from './js/graph-canvas.js';
-    import { createStage, SEARCH_STATUS_MARKDOWN } from './js/stage.js';
+    import { createStage, setEditorBodyBuilder, SEARCH_STATUS_MARKDOWN } from './js/stage.js';
+    import { buildEditorBody } from './js/editor.js';
     import { initInspector } from './js/inspector.js';
     import { createEventStream, initEventConsole } from './js/event-stream.js';
     import {
@@ -396,6 +397,11 @@
     // tool views; the graph above becomes a narrow navigation strip.
     const stageEl = document.getElementById('stage');
     const stage = createStage(stageEl);
+    // The canvas code editor is a real Monaco-backed editor (ui/js/editor.js)
+    // with a workspace file browser and "Open in Zed". stage.js stays
+    // dependency-free; the editor builder is injected here. If Monaco cannot
+    // load, editor.js falls back to the textarea and says so in the status bar.
+    setEditorBodyBuilder(buildEditorBody);
     const stripEl = document.getElementById('node-strip');
     const stripListEl = document.getElementById('node-strip-list');
     const stripRevealEl = document.getElementById('strip-reveal');

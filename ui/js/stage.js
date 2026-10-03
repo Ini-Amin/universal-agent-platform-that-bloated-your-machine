@@ -559,7 +559,18 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   return body;
 }
 
-export function buildEditorBody(body, spec, emit = () => {}) {
+// The editor view is a real Monaco-backed editor (see ui/js/editor.js). It is
+// injected by index.html with `setEditorBodyBuilder(buildEditorBody)` so this
+// module stays dependency-free and the linkedom contract test can run stage.js
+// on its own. When no builder is injected (or the injected builder throws) the
+// honest textarea fallback below is used -- never a blank panel.
+let _editorBodyBuilder = null;
+
+export function setEditorBodyBuilder(fn) {
+  _editorBodyBuilder = typeof fn === 'function' ? fn : null;
+}
+
+function _buildFallbackEditorBody(body, spec, emit) {
   body.classList.add('stage-editor-body');
 
   const container = document.createElement('div');
@@ -863,6 +874,23 @@ export function buildEditorBody(body, spec, emit = () => {}) {
 
   return body;
 }
+
+// Public entry point for the editor view. Delegates to the injected builder
+// (the real Monaco editor) and degrades to the textarea fallback if that
+// builder is absent or throws, so the view is never blank.
+export function buildEditorBody(body, spec = {}, emit = () => {}) {
+  if (_editorBodyBuilder) {
+    try {
+      return _editorBodyBuilder(body, spec, emit);
+    } catch (err) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('editor builder failed; using textarea fallback', err);
+      }
+    }
+  }
+  return _buildFallbackEditorBody(body, spec, emit);
+}
+
 export function createStage(containerEl) {
   if (!containerEl) throw new Error('createStage: a container element is required');
 

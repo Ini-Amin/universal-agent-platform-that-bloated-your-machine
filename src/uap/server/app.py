@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import threading
 import time
 import uuid
 from collections import deque
@@ -98,6 +100,14 @@ DEFAULT_MAX_REPLAY = 1_000
 #: Retention cap for the in-memory run registry (FIFO by creation time).
 #: Evicted runs return 404 honestly rather than serving stale entries.
 DEFAULT_MAX_RUNS = 500
+
+#: Editor launcher (§Editor). ``UAP_EDITOR_BIN`` overrides the safe default;
+#: the value is always invoked as an argv element, never through a shell.
+DEFAULT_EDITOR_BIN = "zed"
+#: Largest file the workspace file API will read into an editor buffer.
+MAX_WORKSPACE_FILE_BYTES = 1024 * 1024
+#: Largest number of entries one directory listing returns (honest truncation).
+MAX_WORKSPACE_LISTING = 500
 
 # --------------------------------------------------------------------------- #
 # Request / response bodies
@@ -205,6 +215,24 @@ class SandboxRunResponse(BaseModel):
     exit_code: int
     duration_ms: float
     truncated: bool
+
+class EditorOpenRequest(BaseModel):
+    """Body of ``POST /api/editor/open``."""
+
+    path: str
+
+class WorkspaceWriteRequest(BaseModel):
+    """Body of ``POST /api/workspace/files`` (save a file back to disk)."""
+
+    path: str
+    content: str
+
+class EditorStatusResponse(BaseModel):
+    """Response of ``GET /api/editor/status``."""
+
+    available: bool
+    binary: str
+    reason: str
 # --------------------------------------------------------------------------- #
 # Run bookkeeping
 # --------------------------------------------------------------------------- #
@@ -475,6 +503,81 @@ def _build_llm_synthesizer(router: Any | None = None):
     return synthesize
 
 
+def _workspace_root() -> Path:
+    """The default workspace root: ``UAP_WORKSPACE_DIR`` or the process cwd.
+
+    Mirrors :mod:`uap.server.ws` so the terminal and the file browser agree on
+    exactly which directory the workspace is.
+    """
+    env = os.environ.get("UAP_WORKSPACE_DIR")
+    if env:
+        return Path(env).resolve()
+    return Path.cwd().resolve()
+
+def confine_workspace_path(path: str, root: Path) -> Path:
+    """Resolve ``path`` under ``root`` and refuse anything that escapes it.
+
+    Same containment discipline as the artifact store: the candidate is
+    *resolved* first (which follows symlinks) and only then checked, so a
+    symlink pointing outside the root, a ``..`` traversal, and an absolute
+    path outside the root are all refused. A NUL byte is refused outright.
+    The empty string and ``.`` mean the root itself.
+    """
+    if not isinstance(path, str):
+        raise ValueError("path must be a string")
+    if "\x00" in path:
+        raise ValueError("path must not contain NUL bytes")
+    raw = path.strip()
+    if raw in ("", ".", "./"):
+        return root
+    candidate = Path(raw)
+    target = (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (root / candidate).resolve()
+    )
+    if not target.is_relative_to(root):
+        raise PermissionError(f"path {path!r} escapes the workspace root")
+    return target
+
+def _rel_workspace_path(target: Path, root: Path) -> str:
+    """The POSIX-style, root-relative form of ``target`` (never absolute)."""
+    if target == root:
+        return ""
+    return target.relative_to(root).as_posix()
+
+def _editor_binary_path(binary: str) -> str | None:
+    """Resolve the editor binary to an executable path, or ``None``.
+
+    A bare name is looked up on ``PATH``; a path with a separator is accepted
+    only when it points at an executable file. No shell is involved.
+    """
+    if os.sep in binary or (os.altsep and os.altsep in binary):
+        candidate = Path(binary)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        return None
+    return shutil.which(binary)
+
+def editor_status() -> dict[str, Any]:
+    """Whether the configured editor can be launched, and why not when it cannot."""
+    binary = (os.environ.get("UAP_EDITOR_BIN") or DEFAULT_EDITOR_BIN).strip() or DEFAULT_EDITOR_BIN
+    resolved = _editor_binary_path(binary)
+    if resolved is not None:
+        return {
+            "available": True,
+            "binary": binary,
+            "reason": f"'{binary}' is installed and executable",
+        }
+    return {
+        "available": False,
+        "binary": binary,
+        "reason": (
+            f"'{binary}' was not found on PATH; install it or set UAP_EDITOR_BIN "
+            "to the editor binary"
+        ),
+    }
+
 def create_app(
     *,
     bus: EventBus | None = None,
@@ -488,6 +591,7 @@ def create_app(
     max_runs: int = DEFAULT_MAX_RUNS,
     max_events: int = DEFAULT_MAX_EVENTS,
     max_replay: int = DEFAULT_MAX_REPLAY,
+    workspace_dir: Path | str | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -497,6 +601,10 @@ def create_app(
             attached under ``runs_dir``.
         runs_dir: filesystem root for event logs and artifacts (default
             ``./data/runs``).
+        workspace_dir: filesystem root the editor file browser and the "Open in
+            Zed" launcher are confined to. When omitted, ``UAP_WORKSPACE_DIR``
+            (if set) is used, else the process cwd -- the same default the
+            terminal uses.
         run_inline: run workflows synchronously inside the request instead of a
             background task. Deterministic and required for ``TestClient``.
         heartbeat_interval: seconds between SSE heartbeat comments.
@@ -649,6 +757,12 @@ def create_app(
     app.state.runs = runs
     app.state.max_runs = max_runs
     app.state.runs_dir = runs_root
+    #: Root the editor's file browser and "Open in Zed" launcher are confined
+    #: to. Explicit param wins; otherwise UAP_WORKSPACE_DIR / cwd (same default
+    #: as the terminal). Stored resolved so every containment check is absolute.
+    app.state.workspace_dir = (
+        Path(workspace_dir).resolve() if workspace_dir is not None else _workspace_root()
+    )
     app.state.gate = gate
     app.state.entry = entry
     app.state.router = router
@@ -765,7 +879,7 @@ def create_app(
             events_getter=lambda task_id: memory_sink.query(task_id=task_id),
         )
 
-    app.include_router(build_ws_router(_ws_service_factory))
+    app.include_router(build_ws_router(_ws_service_factory, workspace_dir=app.state.workspace_dir))
 
     if _UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
@@ -3003,6 +3117,264 @@ def create_app(
             max_memory_mb=max_memory_mb,
             max_output_bytes=max_output_bytes,
         )
+
+    # -- /api/editor ----------------------------------------------------- #
+    #
+    # "Open in Zed" and the workspace file browser. Zed is a native GUI app:
+    # it cannot be embedded in a browser, so these routes let the server --
+    # which runs on the same machine as the user -- open the real editor on
+    # the user's screen. Both routes are confined to ``workspace_dir`` with the
+    # same resolve-then-check discipline the artifact store uses.
+
+    def _ws_root(request: Request) -> Path:
+        root = getattr(request.app.state, "workspace_dir", None)
+        return Path(root) if root is not None else _workspace_root()
+
+    def _require_editor_writer(request: Request) -> None:
+        """Auth gate for editor side effects: viewers are refused."""
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(
+                status_code=403,
+                detail="forbidden: viewers cannot open files in the editor",
+            )
+
+    @app.get("/api/editor/status", response_model=EditorStatusResponse)
+    async def get_editor_status() -> dict[str, Any]:
+        """Whether "Open in Zed" can work here, and why not when it cannot."""
+        return editor_status()
+
+    @app.post("/api/editor/open")
+    async def open_in_editor(
+        request: Request, body: EditorOpenRequest
+    ) -> dict[str, Any]:
+        """Launch the configured editor (default ``zed``) on a workspace file.
+
+        Security properties:
+
+        * the path is resolved under ``workspace_dir`` and a ``..`` traversal,
+          an absolute path outside the root, or a symlink pointing out is
+          refused (``400``);
+        * the binary is a single argv element -- the path is NEVER interpolated
+          into a shell string, so a filename with ``;``/``$(...)`` is inert;
+        * viewers are refused (``403``);
+        * the process is spawned detached and the request returns immediately;
+          the server never waits for the editor to exit.
+        """
+        _require_editor_writer(request)
+        root = _ws_root(request)
+        try:
+            target = confine_workspace_path(body.path, root)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if not target.exists():
+            raise HTTPException(
+                status_code=404, detail=f"file not found in workspace: {body.path!r}"
+            )
+
+        status = editor_status()
+        if not status["available"]:
+            raise HTTPException(status_code=409, detail=status["reason"])
+        binary = _editor_binary_path(status["binary"])
+        assert binary is not None  # status said available
+
+        rel = _rel_workspace_path(target, root)
+        try:
+            # argv list, shell=False (default): the path can never be parsed as
+            # a command. start_new_session detaches the child from the server's
+            # process group so it survives (and is not killed with) the server.
+            proc = subprocess.Popen(  # noqa: S603 - argv form, no shell
+                [binary, str(target)],
+                cwd=str(root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not launch editor: {redact_text(str(exc))}"
+            ) from exc
+
+        # Reap the child when it exits WITHOUT blocking the request or the event
+        # loop. ``start_new_session`` detaches it, but if nobody ever waits on
+        # it the kernel keeps a zombie in our process table (seen live: the
+        # launched ``zed`` shim sat as ``Zs``). A tiny background thread does
+        # the ``wait()``; it is daemonised and dies with the server.
+        def _reap(p: subprocess.Popen) -> None:
+            try:
+                p.wait()
+            except Exception as exc:  # pragma: no cover - defensive
+                log_swallowed_exception(
+                    logger, exc, "failed to reap a launched editor process"
+                )
+
+        threading.Thread(target=_reap, args=(proc,), daemon=True).start()
+
+        return {
+            "launched": True,
+            "binary": status["binary"],
+            "pid": proc.pid,
+            "path": rel,
+        }
+
+    # -- /api/workspace/files -------------------------------------------- #
+
+    @app.get("/api/workspace/files")
+    async def list_workspace_files(
+        request: Request, path: str = ""
+    ) -> dict[str, Any]:
+        """List one directory inside the workspace root (contained).
+
+        ``path`` is relative to the workspace root; the empty string lists the
+        root. Directories are marked with ``is_dir`` so the UI can navigate.
+        A ``..`` traversal, an absolute path outside the root, or a symlink
+        pointing out is refused with ``400``.
+        """
+        root = _ws_root(request)
+        try:
+            target = confine_workspace_path(path, root)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"no such path: {path!r}")
+        if not target.is_dir():
+            raise HTTPException(status_code=400, detail=f"not a directory: {path!r}")
+
+        entries: list[dict[str, Any]] = []
+        truncated = False
+        try:
+            children = sorted(
+                target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not read directory: {redact_text(str(exc))}"
+            ) from exc
+        for child in children:
+            if len(entries) >= MAX_WORKSPACE_LISTING:
+                truncated = True
+                break
+            # ``child`` comes from the already-contained directory. Resolve it
+            # so a symlink pointing outside the root is listed as such (and is
+            # not navigable) instead of silently leading the browser out.
+            try:
+                resolved = child.resolve()
+            except OSError:
+                continue
+            contained = resolved.is_relative_to(root)
+            is_dir = contained and child.is_dir()
+            size: int | None = None
+            if contained and child.is_file():
+                try:
+                    size = child.stat().st_size
+                except OSError:
+                    size = None
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": _rel_workspace_path(resolved if contained else child, root)
+                    if contained
+                    else child.name,
+                    "is_dir": is_dir,
+                    "size": size,
+                    "contained": contained,
+                }
+            )
+
+        return {
+            "path": _rel_workspace_path(target, root),
+            "root": str(root),
+            "entries": entries,
+            "truncated": truncated,
+        }
+
+    @app.get("/api/workspace/file")
+    async def read_workspace_file(request: Request, path: str) -> dict[str, Any]:
+        """Read one UTF-8 text file inside the workspace root (contained)."""
+        root = _ws_root(request)
+        try:
+            target = confine_workspace_path(path, root)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no such file: {path!r}")
+
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not stat file: {redact_text(str(exc))}"
+            ) from exc
+        if size > MAX_WORKSPACE_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"file is {size} bytes; the editor reads at most "
+                    f"{MAX_WORKSPACE_FILE_BYTES} bytes"
+                ),
+            )
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=415, detail="file is not UTF-8 text and cannot be opened"
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not read file: {redact_text(str(exc))}"
+            ) from exc
+
+        return {
+            "path": _rel_workspace_path(target, root),
+            "size": size,
+            "content": content,
+        }
+
+    @app.post("/api/workspace/file")
+    async def write_workspace_file(
+        request: Request, body: WorkspaceWriteRequest
+    ) -> dict[str, Any]:
+        """Write a UTF-8 text file inside the workspace root (contained).
+
+        This is what makes "edit the project" real: the buffer is persisted to
+        the file the browser opened, not downloaded. Viewers are refused, and
+        the same containment rules apply as on read.
+        """
+        _require_editor_writer(request)
+        root = _ws_root(request)
+        try:
+            target = confine_workspace_path(body.path, root)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if target == root or target.is_dir():
+            raise HTTPException(status_code=400, detail=f"not a file path: {body.path!r}")
+
+        data = body.content.encode("utf-8")
+        if len(data) > MAX_WORKSPACE_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"content is {len(data)} bytes; the editor writes at most "
+                    f"{MAX_WORKSPACE_FILE_BYTES} bytes"
+                ),
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not write file: {redact_text(str(exc))}"
+            ) from exc
+
+        return {
+            "path": _rel_workspace_path(target, root),
+            "bytes": len(data),
+        }
 
     # Canvas IDE is the primary UI at the root: mounted LAST so every API route
     # above wins; only unmatched paths (/, /js/*, /css/*) fall through to it.
