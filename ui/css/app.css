@@ -263,6 +263,9 @@ body {
   font-size: 12px;
   color: var(--ok);
 }
+/* The server stopped answering (checkConnection in index.html). */
+.env-status-indicator.is-down .status-dot { background: var(--err); }
+.env-status-indicator.is-down .status-label { color: var(--err); }
 
 .env-settings-btn {
   background: transparent;
@@ -296,7 +299,7 @@ body {
   padding: 0 8px;
   gap: 10px;
   box-sizing: border-box;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
 }
 
@@ -342,17 +345,122 @@ body {
 }
 
 /* Operator Workspace */
+/* Toolbar on top, canvas and output pane side by side, event console below.
+   These were stacked in a flex column inside a scrolling box, so the output
+   pane (and with it every run's result) rendered below the fold, and the
+   hard-coded `calc(100vw - 240px)` width left a dead 240px strip when the
+   sidebar was collapsed. The grid gives each pane its own track instead. */
 .operator-workspace {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "toolbar toolbar"
+    "canvas  output"
+    "console console";
+  flex: 1 1 0;
   min-width: 0;
-  width: calc(100vw - 240px);
-  max-width: calc(100vw - 240px);
   height: 100vh;
   background: var(--bg);
-  overflow: auto;
+  overflow: hidden;
   box-sizing: border-box;
+}
+.operator-workspace > .workspace-toolbar { grid-area: toolbar; }
+.operator-workspace > .pane-canvas { grid-area: canvas; min-height: 0; }
+.operator-workspace > .pane-inspector { grid-area: output; min-height: 0; }
+.operator-workspace > .pane-console { grid-area: console; }
+
+/* Output / event-console toggles in the toolbar. Pressed means "shown". */
+.btn-panel-toggle {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn-panel-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--panel-3);
+}
+/* A run finished while the output pane was closed. */
+.btn-panel-toggle.has-update::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.panel-toggles {
+  display: flex;
+  gap: 6px;
+}
+
+/* History popover: recent runs, newest first. */
+.history-popover {
+  position: fixed;
+  z-index: 60;
+  width: 360px;
+  max-height: min(420px, 70vh);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.history-popover[hidden] { display: none; }
+.history-title {
+  padding: 6px 8px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.history-empty {
+  padding: 12px 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.history-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 2px;
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.history-item:hover,
+.history-item:focus-visible { background: var(--panel-3); }
+.history-item.is-current { border-color: var(--accent); }
+.history-item .status-dot { grid-row: 1; align-self: center; }
+.history-item .status-dot-failed { background: var(--err); }
+.history-item .status-dot-running { background: var(--accent); }
+.history-item .status-dot-paused { background: var(--warn); }
+.history-item .status-dot-pending,
+.history-item .status-dot-accepted { background: var(--fg-muted); }
+.history-text {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-meta {
+  grid-column: 2;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
 }
 
 /* Workspace Toolbar (72px) */
@@ -481,17 +589,21 @@ body {
 .task-context-header {
   width: 100%;
   max-width: 1312px;
-  height: 92px;
+  /* A fixed 92px single row crushed the task input to 10px, and put the layout
+     buttons on top of Run, once the output pane took 420px of a 1280px screen.
+     It wraps instead. */
+  height: auto;
   min-height: 92px;
-  max-height: 92px;
+  max-height: none;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0 20px;
+  padding: 12px 20px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 9px;
+  gap: 10px 9px;
   box-sizing: border-box;
   flex-shrink: 0;
 }
@@ -501,7 +613,7 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  flex: 1;
+  flex: 1 1 340px;
   min-width: 0;
 }
 
@@ -547,6 +659,7 @@ body {
   max-width: 100%;
   min-width: 0 !important;
   padding: 2px 4px !important;
+  text-overflow: ellipsis;
 }
 .task-context-title-input:hover {
   border-color: var(--border) !important;
@@ -569,6 +682,10 @@ body {
 .task-context-subline {
   font-size: 11px;
   color: var(--fg-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-context-actions {
@@ -579,9 +696,11 @@ body {
 }
 
 .btn-add-surface {
-  width: 116px;
+  width: auto;
   height: 34px;
   min-width: 116px;
+  padding: 0 14px;
+  white-space: nowrap;
   background: var(--panel-3);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1236,7 +1355,9 @@ input[type="text"].input-error {
 /* Toast Notification System (§52/§54) */
 .toast-container {
   position: fixed;
-  top: 80px;
+  /* Bottom-right: the old top-right spot sat on the Free / Split / Add surface /
+     Share controls and blocked them while a toast was showing. */
+  bottom: 24px;
   right: 24px;
   z-index: 9999;
   display: flex;
@@ -1616,6 +1737,12 @@ input[type="text"].input-error {
   flex-direction: column;
   gap: 6px;
 }
+.modal-field-error {
+  display: none;
+  font-size: 11px;
+  color: var(--err);
+}
+.modal-form-group input.input-error + .modal-field-error { display: block; }
 .modal-form-group label {
   font-size: 11px;
   color: var(--fg-muted);
