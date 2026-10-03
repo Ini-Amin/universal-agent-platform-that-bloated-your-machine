@@ -29,6 +29,9 @@ for db in uap uap_test; do
   psql_admin "$db" -c "CREATE EXTENSION IF NOT EXISTS vector"
 done
 
+# Both databases are migrated, as CI does, so `pytest` runs against uap_test.
+for db in uap_test uap; do
+  DATABASE_URL="postgresql+psycopg://uap:uap_local_dev@127.0.0.1:${db_port}/${db}" .venv/bin/alembic upgrade head
+done
 export DATABASE_URL="postgresql+psycopg://uap:uap_local_dev@127.0.0.1:${db_port}/uap"
-.venv/bin/alembic upgrade head
 exec .venv/bin/uvicorn uap.server.app:create_app --factory --host "$host" --port "$port"
