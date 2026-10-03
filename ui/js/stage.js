@@ -421,6 +421,7 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   tabPlus.type = 'button';
   tabPlus.className = 'stage-terminal-tab stage-terminal-tab-plus';
   tabPlus.textContent = '+';
+  tabPlus.title = 'New shell tab';
   tabs.appendChild(tabRun);
   tabs.appendChild(tabShell);
   tabs.appendChild(tabProblems);
@@ -468,9 +469,80 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
   summary.appendChild(summaryLeft);
   summary.appendChild(summaryRight);
 
+  const problemsView = document.createElement('div');
+  problemsView.className = 'stage-terminal-problems';
+  problemsView.style.display = 'none';
+  problemsView.style.padding = '12px 14px';
+  problemsView.style.fontSize = '12px';
+  problemsView.style.color = 'var(--fg-muted)';
+  problemsView.innerHTML = '<span style="color: var(--ok); margin-right: 6px;">✓</span> No problems detected in workspace (0 errors, 0 warnings)';
+
+  function setTerminalTab(name, btn) {
+    tabs.querySelectorAll('.stage-terminal-tab').forEach(t => t.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    if (name === 'run') {
+      buffer.style.display = 'block';
+      toolbar.style.display = 'flex';
+      inputForm.style.display = 'none';
+      problemsView.style.display = 'none';
+      summary.style.display = 'flex';
+    } else if (name === 'problems') {
+      buffer.style.display = 'none';
+      toolbar.style.display = 'none';
+      inputForm.style.display = 'none';
+      problemsView.style.display = 'block';
+      summary.style.display = 'none';
+    } else {
+      buffer.style.display = 'block';
+      toolbar.style.display = 'flex';
+      inputForm.style.display = 'flex';
+      problemsView.style.display = 'none';
+      summary.style.display = 'none';
+      setTimeout(() => inputEl.focus(), 50);
+    }
+  }
+  tabRun.addEventListener('click', () => setTerminalTab('run', tabRun));
+  tabShell.addEventListener('click', () => setTerminalTab('shell', tabShell));
+  tabProblems.addEventListener('click', () => setTerminalTab('problems', tabProblems));
+  let shellTabNum = 1;
+  tabPlus.addEventListener('click', () => {
+    shellTabNum += 1;
+    const newTab = document.createElement('button');
+    newTab.type = 'button';
+    newTab.className = 'stage-terminal-tab';
+    newTab.textContent = `Shell ${shellTabNum}`;
+    tabs.insertBefore(newTab, tabPlus);
+    newTab.addEventListener('click', () => setTerminalTab(`shell-${shellTabNum}`, newTab));
+    setTerminalTab(`shell-${shellTabNum}`, newTab);
+    appendOutput(`\n--- Session shell-${shellTabNum} ---\n${spec.prompt || '$'} `);
+  });
+  inputForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const cmd = inputEl.value.trim();
+    if (!cmd) return;
+    appendOutput(`\n${spec.prompt || '$'} ${cmd}\n`);
+    inputEl.value = '';
+    if (socket && isConnected) {
+      socket.send(JSON.stringify({ type: 'input', data: cmd + '\n' }));
+    } else {
+      if (cmd === 'clear') {
+        clearBuffer();
+      } else if (cmd === 'pwd') {
+        appendOutput(`${spec.cwd || '~/usage-dashboard'}\n`);
+      } else if (cmd === 'ls') {
+        appendOutput('App.tsx  UsageChart.tsx  components/  package.json  styles.css\n');
+      } else if (cmd.startsWith('echo ')) {
+        appendOutput(`${cmd.slice(5)}\n`);
+      } else {
+        appendOutput(`[shell] command executed: ${cmd}\n`);
+      }
+    }
+  });
+
   container.appendChild(tabs);
   container.appendChild(toolbar);
   container.appendChild(buffer);
+  container.appendChild(problemsView);
   container.appendChild(inputForm);
   container.appendChild(summary);
   body.appendChild(container);
@@ -493,8 +565,18 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
     clearBuffer();
   });
 
-  if (spec.initialText) {
-    appendOutput(spec.initialText.endsWith('\n') ? spec.initialText : spec.initialText + '\n');
+  const DEFAULT_TERMINAL_LOG = [
+    '14:32:08 builder Scaffolded React + TypeScript project',
+    '14:32:12 files   Created App.tsx, UsageChart.tsx, styles.css',
+    '14:32:18 shell   npm run build && npm run test',
+    '14:32:24 vite    Build complete · 42 modules · 1.24s',
+    '14:32:31 vitest  8 tests passed (8) · 0 failures',
+    '14:32:50 browser Preview ready at http://localhost:5173',
+    '> ~/usage-dashboard █'
+  ].join('\n');
+  const initialLog = spec.initialText !== undefined ? spec.initialText : DEFAULT_TERMINAL_LOG;
+  if (initialLog) {
+    appendOutput(initialLog.endsWith('\n') ? initialLog : initialLog + '\n');
   }
 
   const proto = (typeof window !== 'undefined' && window.location && window.location.protocol === 'https:') ? 'wss:' : 'ws:';
@@ -1728,14 +1810,21 @@ export function createStage(containerEl, options = {}) {
     if (!entry) return false;
     if (filledViewId && filledViewId !== targetId) {
       const prev = views.get(filledViewId);
-      if (prev) prev.cardEl.classList.remove('stage-card-filled');
+      if (prev) {
+        prev.cardEl.classList.remove('stage-card-filled');
+        if (prev.cardEl.__origParent) {
+          prev.cardEl.__origParent.appendChild(prev.cardEl);
+          delete prev.cardEl.__origParent;
+        }
+      }
     }
     filledViewId = targetId;
     containerEl.classList.add('stage-fill-active');
+    if (splitMode) {
+      entry.cardEl.__origParent = entry.cardEl.parentElement;
+      containerEl.appendChild(entry.cardEl);
+    }
     entry.cardEl.classList.add('stage-card-filled');
-    // The filled box is a different size than the tiled one; let Monaco (and
-    // any size-aware embed) re-measure. A filled terminal's buffer also grows
-    // to the full stage height via the fill CSS.
     relayoutView(targetId);
     emit({ type: 'fill', id: targetId, kind: entry.spec.kind, filled: true });
     return true;
@@ -1745,7 +1834,13 @@ export function createStage(containerEl, options = {}) {
     if (!filledViewId) return false;
     const currentId = filledViewId;
     const entry = views.get(currentId);
-    if (entry) entry.cardEl.classList.remove('stage-card-filled');
+    if (entry) {
+      entry.cardEl.classList.remove('stage-card-filled');
+      if (entry.cardEl.__origParent) {
+        entry.cardEl.__origParent.appendChild(entry.cardEl);
+        delete entry.cardEl.__origParent;
+      }
+    }
     filledViewId = null;
     containerEl.classList.remove('stage-fill-active');
     applyViewport(); // restore infinite plane transform
@@ -1753,6 +1848,7 @@ export function createStage(containerEl, options = {}) {
     emit({ type: 'fill', id: currentId, kind: entry ? entry.spec.kind : null, filled: false });
     return true;
   }
+
 
   function getFilledViewId() {
     return filledViewId;
@@ -2424,7 +2520,11 @@ export function createStage(containerEl, options = {}) {
 
         const frame = document.createElement('iframe');
         frame.className = 'stage-iframe';
-        frame.src = spec.url;
+        if (spec.srcdoc) {
+          frame.srcdoc = spec.srcdoc;
+        } else {
+          frame.src = spec.url;
+        }
         frame.title = spec.title || 'Embedded view';
         frame.setAttribute('loading', 'lazy');
         frame.setAttribute('referrerpolicy', 'no-referrer');
@@ -2458,16 +2558,23 @@ export function createStage(containerEl, options = {}) {
         const identity = document.createElement('div');
         identity.className = 'stage-handoff-identity';
         identity.innerHTML = `
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="1.5" y="1.5" width="9" height="9" rx="2" stroke="#C8CDDB" stroke-width="1.2"/><path d="M4 6H8M6 4V8" stroke="#C8CDDB" stroke-width="1.2"/></svg>
-          <span style="font-weight: 600;">Builder agent</span>
-          <span style="color: var(--fg-muted); font-size: 9px;">just now</span>
+          <div class="stage-handoff-agent-icon">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="2" y="2" width="12" height="12" rx="3" stroke="#C8CDDB" stroke-width="1.4"/>
+              <circle cx="6" cy="7" r="1" fill="#C8CDDB"/>
+              <circle cx="10" cy="7" r="1" fill="#C8CDDB"/>
+              <path d="M5 11C5.5 11.5 6.5 12 8 12C9.5 12 10.5 11.5 11 11" stroke="#C8CDDB" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span style="font-weight: 600; color: #E2E6F0; font-size: 13px;">${escapeHtml(spec.agent || 'Builder')}</span>
+          <span style="color: var(--fg-muted); font-size: 11px;">just now</span>
         `;
 
         const status = document.createElement('div');
         status.className = 'stage-handoff-status';
         status.innerHTML = `
           <span class="status-dot"></span>
-          <span>8 / 8 tests passed</span>
+          <span style="font-size: 12px; color: var(--ok); font-weight: 500;">8 / 8 tests passed</span>
         `;
 
         heading.appendChild(identity);
@@ -2475,15 +2582,25 @@ export function createStage(containerEl, options = {}) {
 
         const summary = document.createElement('div');
         summary.className = 'stage-handoff-summary';
-        summary.textContent = spec.summary || 'Task completed successfully. All unit tests passed and changes verified in sandbox environment.';
+        summary.textContent = spec.summary || 'Dashboard built and verified. Added usage metrics, a 7-day request chart, and endpoint breakdown with responsive layouts.';
+
+        const changeLabel = document.createElement('div');
+        changeLabel.className = 'stage-handoff-change-label';
+        changeLabel.textContent = 'Request a change';
 
         const promptRow = document.createElement('form');
         promptRow.className = 'stage-handoff-prompt';
         promptRow.innerHTML = `
-          <input type="text" class="stage-handoff-input" placeholder="Ask follow-up or give instruction..." />
-          <button type="submit" class="stage-handoff-send" aria-label="Send">
+          <button type="button" class="stage-handoff-add-btn" title="Add context or file" aria-label="Add context">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M2 7H12M12 7L7 2M12 7L7 12" stroke="#DD7FD3" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M7 2V12M2 7H12" stroke="#9AA1B4" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <input type="text" class="stage-handoff-input" placeholder="Ask Builder to make a change..." aria-label="Ask Builder to make a change" />
+          <span class="stage-handoff-kbd font-mono">⌘ ↵</span>
+          <button type="submit" class="stage-handoff-send" title="Send request" aria-label="Send request">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 10V2M6 2L2 6M6 2L10 6" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
         `;
@@ -2499,6 +2616,7 @@ export function createStage(containerEl, options = {}) {
 
         wrap.appendChild(heading);
         wrap.appendChild(summary);
+        wrap.appendChild(changeLabel);
         wrap.appendChild(promptRow);
         body.appendChild(wrap);
         return body;
