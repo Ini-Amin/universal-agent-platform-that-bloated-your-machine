@@ -904,7 +904,15 @@ export function createStage(containerEl) {
   let seq = 0;
   // [ExcalidrawCanvas] fill mode state & helpers
   let filledViewId = null;
-  const FILLABLE_KINDS = new Set(['whiteboard', 'iframe', 'video', 'image']);
+  // `editor` and `terminal` are the two views that need the most room, so they
+  // are fillable too (owner bug: they had no way to expand).
+  const FILLABLE_KINDS = new Set(['whiteboard', 'iframe', 'video', 'image', 'editor', 'terminal']);
+
+  // [Resize] Minimum card size in CSS px. A card can never be dragged smaller
+  // than this, so it cannot collapse to nothing: 280 wide x 200 tall.
+  const MIN_CARD_W = 280;
+  const MIN_CARD_H = 200;
+  const sizes = new Map(); // id -> { w, h }
 
   // [InfiniteCanvas] Storage helpers (safe for LinkeDOM / SSR / private mode)
   function getStorage(key) {
@@ -961,6 +969,8 @@ export function createStage(containerEl) {
   let isSpaceDown = false;
   let draggingCard = null;
   let hasCardMoved = false;
+  let resizingCard = null;
+  let hasCardResized = false;
 
   function saveViewport() {
     setStorage('uap.stage.viewport', JSON.stringify(viewport));
@@ -986,6 +996,80 @@ export function createStage(containerEl) {
     if (kind === 'whiteboard' || kind === 'iframe') return 480;
     if (kind === 'terminal' || kind === 'editor') return 440;
     return 380;
+  }
+
+  // [Resize] Per-view size, persisted like position. Returns null when the view
+  // has never been resized so the CSS per-kind default stays in charge.
+  function loadCardSize(id) {
+    const raw = getStorage(`uap.stage.size.${id}`);
+    if (!raw) return null;
+    try {
+      const s = JSON.parse(raw);
+      if (typeof s?.w === 'number' && typeof s?.h === 'number') {
+        return {
+          w: Math.max(MIN_CARD_W, Math.round(s.w)),
+          h: Math.max(MIN_CARD_H, Math.round(s.h)),
+        };
+      }
+    } catch (_e) {}
+    return null;
+  }
+
+  function applyCardSize(cardEl, id) {
+    const size = sizes.get(id);
+    if (!cardEl || !size) return;
+    cardEl.style.width = `${size.w}px`;
+    cardEl.style.height = `${size.h}px`;
+  }
+
+  function setCardSize(id, w, h, { persist = true } = {}) {
+    const targetId = String(id);
+    const size = {
+      w: Math.max(MIN_CARD_W, Math.round(w)),
+      h: Math.max(MIN_CARD_H, Math.round(h)),
+    };
+    sizes.set(targetId, size);
+    const entry = views.get(targetId);
+    if (entry) {
+      applyCardSize(entry.cardEl, targetId);
+      relayoutView(targetId);
+    }
+    if (persist) setStorage(`uap.stage.size.${targetId}`, JSON.stringify(size));
+    return size;
+  }
+
+  function getCardSize(id) {
+    const s = sizes.get(String(id));
+    return s ? { ...s } : null;
+  }
+
+  // [Resize] Tell size-aware inner views that their box changed. Monaco in
+  // particular caches its layout and MUST be given an explicit layout() call,
+  // otherwise it keeps rendering at the old width. Other embeds (iframes,
+  // images, videos, the terminal buffer) are laid out by CSS and follow
+  // automatically, but we still dispatch a window resize so they can react.
+  function relayoutView(id) {
+    const entry = views.get(String(id));
+    if (!entry) return;
+    const body = entry.cardEl.querySelector('.stage-card-body');
+    if (!body) return;
+    const editor = body.__editor;
+    if (editor && typeof editor.getMonaco === 'function') {
+      const monacoEditor = editor.getMonaco();
+      if (monacoEditor && typeof monacoEditor.layout === 'function') {
+        monacoEditor.layout();
+        // The filled class is applied by CSS; re-run once the browser has
+        // recomputed the box so Monaco measures the real (new) size.
+        if (typeof setTimeout === 'function') {
+          setTimeout(() => {
+            try { monacoEditor.layout(); } catch (_e) {}
+          }, 0);
+        }
+      }
+    }
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.Event === 'function') {
+      window.dispatchEvent(new window.Event('resize'));
+    }
   }
 
   // [InfiniteCanvas] Deterministic placement rule:
@@ -1282,6 +1366,10 @@ export function createStage(containerEl) {
     filledViewId = targetId;
     containerEl.classList.add('stage-fill-active');
     entry.cardEl.classList.add('stage-card-filled');
+    // The filled box is a different size than the tiled one; let Monaco (and
+    // any size-aware embed) re-measure. A filled terminal's buffer also grows
+    // to the full stage height via the fill CSS.
+    relayoutView(targetId);
     emit({ type: 'fill', id: targetId, kind: entry.spec.kind, filled: true });
     return true;
   }
@@ -1294,6 +1382,7 @@ export function createStage(containerEl) {
     filledViewId = null;
     containerEl.classList.remove('stage-fill-active');
     applyViewport(); // restore infinite plane transform
+    relayoutView(currentId); // back to the tiled box: re-measure again
     emit({ type: 'fill', id: currentId, kind: entry ? entry.spec.kind : null, filled: false });
     return true;
   }
@@ -1305,6 +1394,7 @@ export function createStage(containerEl) {
   // [InfiniteCanvas] Wheel zoom handler
   containerEl.addEventListener('wheel', (e) => {
     if (filledViewId) return;
+    if (resizingCard) return; // a resize must not zoom the canvas
     const onCardBody = e.target.closest('.stage-card-body');
     if (onCardBody && !e.ctrlKey && !e.metaKey) {
       if (onCardBody.scrollHeight > onCardBody.clientHeight) {
@@ -1322,6 +1412,37 @@ export function createStage(containerEl) {
   // [InfiniteCanvas] Mouse drag / pan interaction
   containerEl.addEventListener('mousedown', (e) => {
     if (filledViewId) return;
+
+    // 0. Resizing a card by its corner handle. This runs before both the
+    //    titlebar drag and the canvas pan so a resize never does either.
+    const resizeHandle = e.target.closest('.stage-card-resize');
+    if (resizeHandle) {
+      const card = resizeHandle.closest('.stage-card');
+      if (!card) return;
+      const viewId = card.dataset.viewId;
+      if (!viewId) return;
+      // Use unscaled layout metrics (offsetWidth/Height), not the zoomed
+      // getBoundingClientRect, so the resize baseline is correct at any zoom.
+      const size = sizes.get(viewId) || {
+        w: card.offsetWidth || getCardWidth(card.dataset.kind),
+        h: card.offsetHeight || getCardHeight(card.dataset.kind),
+      };
+      topZ += 1;
+      card.style.zIndex = String(topZ);
+      resizingCard = {
+        id: viewId,
+        cardEl: card,
+        startX: e.clientX,
+        startY: e.clientY,
+        startW: size.w,
+        startH: size.h,
+      };
+      hasCardResized = false;
+      containerEl.classList.add('stage-resizing');
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
 
     // 1. Dragging card by titlebar
     const titlebar = e.target.closest('.stage-card-titlebar');
@@ -1368,7 +1489,12 @@ export function createStage(containerEl) {
   });
 
   const onWindowMouseMove = (e) => {
-    if (draggingCard) {
+    if (resizingCard) {
+      hasCardResized = true;
+      const dx = (e.clientX - resizingCard.startX) / viewport.zoom;
+      const dy = (e.clientY - resizingCard.startY) / viewport.zoom;
+      setCardSize(resizingCard.id, resizingCard.startW + dx, resizingCard.startH + dy, { persist: false });
+    } else if (draggingCard) {
       hasCardMoved = true;
       const dx = (e.clientX - draggingCard.startX) / viewport.zoom;
       const dy = (e.clientY - draggingCard.startY) / viewport.zoom;
@@ -1388,6 +1514,18 @@ export function createStage(containerEl) {
   };
 
   const onWindowMouseUp = () => {
+    if (resizingCard) {
+      containerEl.classList.remove('stage-resizing');
+      const size = sizes.get(resizingCard.id);
+      if (size) {
+        setStorage(`uap.stage.size.${resizingCard.id}`, JSON.stringify(size));
+        if (hasCardResized) {
+          emit({ type: 'resize', id: resizingCard.id, size: { ...size } });
+        }
+      }
+      resizingCard = null;
+      hasCardResized = false;
+    }
     if (draggingCard) {
       containerEl.classList.remove('stage-dragging');
       const pos = positions.get(draggingCard.id);
@@ -1941,6 +2079,17 @@ export function createStage(containerEl) {
 
     card.appendChild(titlebar);
     card.appendChild(buildBody(spec));
+
+    // [Resize] Bottom-right corner handle. Dragging it resizes the card; the
+    // titlebar keeps moving it and the canvas keeps panning/zooming.
+    const resizeHandle = document.createElement('div');
+    resizeHandle.className = 'stage-card-resize';
+    resizeHandle.setAttribute('role', 'separator');
+    resizeHandle.setAttribute('aria-label', 'Resize view');
+    resizeHandle.title = 'Drag to resize';
+    resizeHandle.dataset.viewId = spec.__id;
+    card.appendChild(resizeHandle);
+
     return card;
   }
 
@@ -1965,8 +2114,14 @@ export function createStage(containerEl) {
       replacement.style.left = `${pos.x}px`;
       replacement.style.top = `${pos.y}px`;
       setStorage(`uap.stage.pos.${s.__id}`, JSON.stringify(pos));
+      const savedSize = sizes.get(s.__id) || loadCardSize(s.__id);
+      if (savedSize) {
+        sizes.set(s.__id, savedSize);
+        applyCardSize(replacement, s.__id);
+      }
       if (filledViewId === s.__id) replacement.classList.add('stage-card-filled');
       views.set(s.__id, { spec: s, cardEl: replacement });
+      relayoutView(s.__id);
       emit({ type: 'update', id: s.__id, kind: s.kind, spec: s });
       return s.__id;
     }
@@ -1978,6 +2133,16 @@ export function createStage(containerEl) {
     card.style.left = `${pos.x}px`;
     card.style.top = `${pos.y}px`;
     setStorage(`uap.stage.pos.${s.__id}`, JSON.stringify(pos));
+
+    // [Resize] Restore a persisted size, if this view was resized before.
+    const savedSize = (s.size && typeof s.size.w === 'number' && typeof s.size.h === 'number')
+      ? { w: Math.max(MIN_CARD_W, Math.round(s.size.w)), h: Math.max(MIN_CARD_H, Math.round(s.size.h)) }
+      : loadCardSize(s.__id);
+    if (savedSize) {
+      sizes.set(s.__id, savedSize);
+      applyCardSize(card, s.__id);
+      setStorage(`uap.stage.size.${s.__id}`, JSON.stringify(savedSize));
+    }
 
     grid.appendChild(card);
     views.set(s.__id, { spec: s, cardEl: card });
@@ -2001,7 +2166,9 @@ export function createStage(containerEl) {
     entry.cardEl.remove();
     views.delete(targetId);
     positions.delete(targetId);
+    sizes.delete(targetId);
     removeStorage(`uap.stage.pos.${targetId}`);
+    removeStorage(`uap.stage.size.${targetId}`);
     emit({ type: 'close', id: targetId });
     updateEmptyState();
     return true;
@@ -2025,7 +2192,9 @@ export function createStage(containerEl) {
       const entry = views.get(id);
       if (entry) entry.cardEl.remove();
       positions.delete(id);
+      sizes.delete(id);
       removeStorage(`uap.stage.pos.${id}`);
+      removeStorage(`uap.stage.size.${id}`);
     }
     views.clear();
     emit({ type: 'clear', ids });
@@ -2102,6 +2271,9 @@ export function createStage(containerEl) {
     resetView,
     getCardPosition,
     setCardPosition,
+    // [Resize]
+    getCardSize,
+    setCardSize,
     destroy,
     updateEmptyState,
     getEmptyStateElement: () => emptyStateEl,

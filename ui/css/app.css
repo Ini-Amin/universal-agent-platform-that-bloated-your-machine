@@ -1376,6 +1376,7 @@ textarea:focus-visible,
 .stage-card[data-kind="terminal"],
 .stage-card[data-kind="editor"] {
   width: 540px;
+  height: 440px;
 }
 
 /* [InfiniteCanvas] Floating zoom controls */
@@ -1537,6 +1538,43 @@ textarea:focus-visible,
   overflow: auto;
 }
 
+/* [Resize] Bottom-right corner grip. Dragging it resizes the card; it sits
+   above the body so the body keeps its own scroll/drag behaviour. */
+.stage-card-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  z-index: 20;
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 0 45%, var(--fg-muted) 45% 52%, transparent 52%),
+    linear-gradient(135deg, transparent 0 62%, var(--fg-muted) 62% 69%, transparent 69%),
+    linear-gradient(135deg, transparent 0 79%, var(--fg-muted) 79% 86%, transparent 86%);
+  opacity: 0.7;
+}
+
+.stage-card-resize:hover,
+.stage-root.stage-resizing .stage-card-resize {
+  opacity: 1;
+}
+
+.stage-root.stage-resizing {
+  cursor: nwse-resize;
+  user-select: none;
+}
+
+.stage-root.stage-resizing iframe {
+  pointer-events: none;
+}
+
+/* A filled card owns the whole stage: no corner grip. */
+.stage-card.stage-card-filled .stage-card-resize {
+  display: none !important;
+}
+
 /* --- Markdown --- */
 .stage-markdown {
   font-size: 13px;
@@ -1637,7 +1675,7 @@ textarea:focus-visible,
 .stage-iframe {
   width: 100%;
   height: 100%;
-  min-height: 420px;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #fff;
@@ -1705,14 +1743,14 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 380px;
+  min-height: 0;
 }
 
 .stage-terminal-container {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 380px;
+  min-height: 0;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1794,8 +1832,7 @@ textarea:focus-visible,
 
 .stage-terminal-buffer {
   flex: 1;
-  min-height: 200px;
-  max-height: 520px;
+  min-height: 0;
   margin: 0;
   padding: 12px;
   font-family: var(--font-mono);
@@ -1861,14 +1898,14 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 420px;
+  min-height: 0;
 }
 
 .stage-editor-container {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 420px;
+  min-height: 0;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1949,8 +1986,7 @@ textarea:focus-visible,
 .stage-editor-workspace {
   display: flex;
   flex: 1;
-  min-height: 220px;
-  max-height: 480px;
+  min-height: 0;
   background: var(--bg);
   position: relative;
   overflow: hidden;
@@ -2057,7 +2093,7 @@ textarea:focus-visible,
 .stage-editor-host {
   flex: 1;
   min-width: 0;
-  min-height: 220px;
+  min-height: 0;
   position: relative;
   overflow: hidden;
 }
@@ -2071,7 +2107,7 @@ textarea:focus-visible,
 .stage-editor-fallback {
   display: flex;
   height: 100%;
-  min-height: 220px;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -2492,6 +2528,42 @@ body.stage-fullscreen .stage-card-exit-fill {
   height: auto !important;
   object-fit: contain !important;
   border-radius: 0 !important;
+}
+
+/* [StageTools] A filled terminal / editor stretches to the full stage height.
+   The terminal buffer takes all the room between toolbar and input bar; the
+   editor host takes all the room between toolbar and status bar. */
+.stage-card.stage-card-filled .stage-terminal-body,
+.stage-card.stage-card-filled .stage-terminal-container,
+.stage-card.stage-card-filled .stage-editor-body,
+.stage-card.stage-card-filled .stage-editor-container {
+  height: 100% !important;
+  min-height: 100% !important;
+  max-height: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+.stage-card.stage-card-filled .stage-terminal-buffer {
+  flex: 1 1 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+.stage-card.stage-card-filled .stage-terminal-container {
+  overflow: hidden !important;
+}
+
+.stage-card.stage-card-filled .stage-editor-workspace {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+.stage-card.stage-card-filled .stage-editor-host {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
 }
 
 /* ==========================================================================
