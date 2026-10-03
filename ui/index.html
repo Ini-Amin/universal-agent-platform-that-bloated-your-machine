@@ -377,6 +377,22 @@
           btnEl.classList.toggle('active', collapsed);
           btnEl.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
         }
+        // Remember the choice. Without this a reload silently restored both
+        // panes, so a user who collapsed them for a full-width stage lost the
+        // layout on every navigation — and had no way to tell it was a setting
+        // rather than a bug (observed 2026-10-03).
+        try {
+          localStorage.setItem(`uap.pane.${side}`, collapsed ? '1' : '0');
+        } catch (_e) {
+          /* storage unavailable (private mode) — layout still works */
+        }
+      }
+
+      // Restore the previous choice.
+      try {
+        if (localStorage.getItem(`uap.pane.${side}`) === '1') apply(true);
+      } catch (_e) {
+        /* ignore */
       }
       handle.addEventListener('click', () => apply(false));
       if (btnEl) btnEl.addEventListener('click', () => apply(!collapsed));
