@@ -996,9 +996,13 @@
       sidebarToggle.toggle();
     });
     document.getElementById('btn-run-again')?.addEventListener('click', () => {
-      document.getElementById('btn-run-task')?.click();
-      const taskVal = document.getElementById('task-input')?.value?.trim();
-      showToast({ kind: 'info', title: 'Running Task', message: taskVal ? `Executing workflow: ${taskVal}` : 'Executing workflow' });
+      const taskVal = executionStore.getState().task?.input?.trim();
+      if (!taskVal) {
+        showToast({ kind: 'info', title: 'No task to repeat', message: 'Run a task first, then you can run it again.' });
+        return;
+      }
+      executeTask(taskVal);
+      showToast({ kind: 'info', title: 'Running Task', message: `Executing workflow: ${taskVal}` });
     });
     document.getElementById('btn-history')?.addEventListener('click', () => {
       showToast({ kind: 'info', title: 'Task History', message: 'No previous runs in current session.' });
@@ -1987,8 +1991,15 @@
     }
 
     // --- Execution Selection & Live Graph Loading ---
+    let executionSelectionVersion = 0;
+
     async function selectExecution(executionId) {
       if (!executionId) return;
+      const selectionVersion = ++executionSelectionVersion;
+      const isCurrentSelection = () =>
+        selectionVersion === executionSelectionVersion &&
+        executionStore.getState().executionId === executionId;
+
       executionStore.setState({
         executionId,
         status: 'connecting',
@@ -1997,6 +2008,7 @@
         error: null,
         artifacts: [],
         evidence_source: null,
+        task: null,
       });
 
       const label = document.getElementById('active-task-label');
@@ -2019,11 +2031,13 @@
       } catch (err) {
         console.warn('Failed to load task details:', err);
       }
+      if (!isCurrentSelection()) return;
 
       // Load REAL graph from /api/executions/{id}/graph
       try {
         const previousGraph = canvasStore.getState().graph;
         const graph = await getExecutionGraph(executionId);
+        if (!isCurrentSelection()) return;
         if (graph && Array.isArray(graph.nodes)) {
           canvasStore.setState({ graph, selectedNodeIds: [], selectedEdgeIds: [], error: null });
           undoStack.push(graph, { actor: 'ai', description: 'Loaded execution graph', previous: previousGraph });
@@ -2037,6 +2051,7 @@
           canvasStore.setState({ graph: null, selectedNodeIds: [], selectedEdgeIds: [], error: 'Execution graph contains no nodes.' });
         }
       } catch (err) {
+        if (!isCurrentSelection()) return;
         // Honest empty state when 404: NO PLACEHOLDER EVER
         canvasStore.setState({
           graph: null,
@@ -2047,6 +2062,7 @@
       }
 
       // Connect WebSocket
+      if (!isCurrentSelection()) return;
       eventStream.connect(executionId);
 
       // Refresh sidebar if on runs/artifacts
@@ -2291,7 +2307,10 @@
         _lastTerminalRefresh = state.executionId;
         getExecutionGraph(state.executionId)
           .then((graph) => {
-            if (graph && Array.isArray(graph.nodes)) {
+            if (
+              executionStore.getState().executionId === state.executionId &&
+              graph && Array.isArray(graph.nodes)
+            ) {
               canvasStore.setState({ graph });
             }
           })
