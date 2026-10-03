@@ -187,3 +187,20 @@ def test_output_and_event_console_have_visible_toggles(client: TestClient) -> No
     assert "consolePane.classList.toggle('collapsed')" not in html
     assert "key.toLowerCase() === 'j'" in html
 
+
+def test_header_describes_the_selected_run(client: TestClient) -> None:
+    html = client.get("/").text
+    # "Ready to run" used to be static markup, so it never changed after a run.
+    assert "function renderRunContext(state)" in html
+    assert "renderRunContext(state);" in html
+    # Nothing to repeat until a run (and its task text) is selected.
+    assert 'id="btn-run-again" class="btn btn-run-again" title="Run a task first" disabled' in html
+
+
+def test_artifact_list_refreshes_when_a_run_finishes(client: TestClient) -> None:
+    html = client.get("/").text
+    marker = "_lastTerminalRefresh = state.executionId;"
+    window = html[html.index(marker) : html.index(marker) + 600]
+    # It was fetched at selection time, before the run produced any artifacts.
+    assert "loadAccordionSection('artifacts');" in window
+

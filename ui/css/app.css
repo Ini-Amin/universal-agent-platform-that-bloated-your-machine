@@ -611,6 +611,10 @@ body {
 .task-context-subline {
   font-size: 11px;
   color: var(--fg-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-context-actions {
