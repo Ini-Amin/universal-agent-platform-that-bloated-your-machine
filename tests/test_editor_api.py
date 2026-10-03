@@ -528,3 +528,142 @@ def test_confine_allows_inside_and_refuses_outside(tmp_path: Path) -> None:
     for bad in ("..", "../x", "/etc", str(tmp_path)):
         with pytest.raises(PermissionError):
             app_mod.confine_workspace_path(bad, root)
+
+
+# --------------------------------------------------------------------------- #
+# 9. Multi-root workspace selection
+# --------------------------------------------------------------------------- #
+
+def test_default_roots_and_home_browsing(client: TestClient, app: FastAPI, workspace: Path) -> None:
+    assert app.state.workspace_roots == {
+        "workspace": workspace.resolve(), "home": Path.home().resolve()
+    }
+    roots = client.get("/api/workspace/roots")
+    assert roots.status_code == 200
+    assert roots.json() == {"roots": [
+        {"id": "workspace", "label": "workspace", "path": str(workspace.resolve())},
+        {"id": "home", "label": "home", "path": str(Path.home().resolve())},
+    ]}
+    home_listing = client.get("/api/workspace/files", params={"root": "home"})
+    assert home_listing.status_code == 200
+    assert home_listing.json()["root"] == str(Path.home().resolve())
+
+
+def test_custom_roots_replace_defaults_and_preserve_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace: Path
+) -> None:
+    other = tmp_path / "other-project"
+    other.mkdir()
+    (other / "main.py").write_text("print('other')\n", encoding="utf-8")
+    monkeypatch.setenv("UAP_WORKSPACE_ROOTS", f"workspace:{workspace},other:{other}")
+    app = create_app(runs_dir=tmp_path / "runs", run_inline=True, workspace_dir=workspace)
+    assert list(app.state.workspace_roots) == ["workspace", "other"]
+    with TestClient(app) as client:
+        roots = client.get("/api/workspace/roots").json()["roots"]
+        assert [root["id"] for root in roots] == ["workspace", "other"]
+        listing = client.get("/api/workspace/files", params={"root": "other"})
+        assert [entry["name"] for entry in listing.json()["entries"]] == ["main.py"]
+        content = client.get("/api/workspace/file", params={"root": "other", "path": "main.py"})
+        assert content.json()["content"] == "print('other')\n"
+        saved = client.post("/api/workspace/file", json={
+            "root": "other", "path": "main.py", "content": "print('saved')\n"
+        })
+        assert saved.status_code == 200
+        assert (other / "main.py").read_text() == "print('saved')\n"
+        assert (workspace / "hello.py").read_text() == "print('hi')\n"
+
+
+@pytest.mark.parametrize("entry", ["other:/missing", "other:", "not-an-entry"])
+def test_invalid_configured_root_fails_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace: Path, entry: str
+) -> None:
+    monkeypatch.setenv("UAP_WORKSPACE_ROOTS", entry)
+    with pytest.raises(ValueError, match="workspace root|UAP_WORKSPACE_ROOTS"):
+        create_app(runs_dir=tmp_path / "runs", run_inline=True, workspace_dir=workspace)
+
+
+def test_unknown_root_is_400_for_all_file_routes(client: TestClient) -> None:
+    requests = [
+        client.get("/api/workspace/files", params={"root": "missing"}),
+        client.get("/api/workspace/file", params={"root": "missing", "path": "hello.py"}),
+        client.post("/api/workspace/file", json={"root": "missing", "path": "hello.py", "content": "x"}),
+        client.post("/api/editor/open", json={"root": "missing", "path": "hello.py"}),
+    ]
+    for response in requests:
+        assert response.status_code == 400, response.text
+        assert "valid ids: workspace, home" in response.json()["detail"]
+
+
+def test_selected_root_refuses_cross_root_traversal_and_symlinks(
+    client: TestClient, app: FastAPI, workspace: Path, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    secret = other / "secret.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+    app.state.workspace_roots["other"] = other.resolve()
+    os.symlink(secret, workspace / "cross-root-link")
+    os.symlink("/etc/hostname", other / "etc-link")
+    cases = [("workspace", "../other/secret.txt"), ("workspace", "cross-root-link"),
+             ("other", "../workspace/hello.py"), ("other", "etc-link")]
+    for root, path in cases:
+        responses = [
+            client.get("/api/workspace/file", params={"root": root, "path": path}),
+            client.post("/api/workspace/file", json={"root": root, "path": path, "content": "PWNED"}),
+            client.post("/api/editor/open", json={"root": root, "path": path}),
+        ]
+        for response in responses:
+            assert response.status_code == 400, (root, path, response.text)
+            assert "escapes the workspace root" in response.json()["detail"]
+    assert secret.read_text() == "SECRET"
+    listing = client.get("/api/workspace/files", params={"root": "other"}).json()
+    assert next(item for item in listing["entries"] if item["name"] == "etc-link")["contained"] is False
+
+
+def test_viewer_can_read_other_root_but_cannot_write(
+    app: FastAPI, no_auth: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from uap.server.auth import Identity
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "example.txt").write_text("original")
+    app.state.workspace_roots["other"] = other.resolve()
+    monkeypatch.setattr(app_mod, "get_current_identity", lambda _conn: Identity(
+        user_id="v", name="Viewer", role="viewer", is_bootstrap=False
+    ))
+    with TestClient(app) as client:
+        assert client.get("/api/workspace/files", params={"root": "other"}).status_code == 200
+        assert client.get("/api/workspace/file", params={"root": "other", "path": "example.txt"}).status_code == 200
+        result = client.post("/api/workspace/file", json={
+            "root": "other", "path": "example.txt", "content": "changed"
+        })
+        assert result.status_code == 403
+    assert (other / "example.txt").read_text() == "original"
+
+
+def test_editor_uses_selected_roots_absolute_path(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "file.py").write_text("x = 42\n")
+    app.state.workspace_roots["other"] = other.resolve()
+    launched = []
+
+    class FakeProcess:
+        pid = 123
+
+        def wait(self):
+            return 0
+
+    def fake_popen(argv, **kwargs):
+        launched.append((argv, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setenv("UAP_EDITOR_BIN", sys.executable)
+    monkeypatch.setattr(app_mod.subprocess, "Popen", fake_popen)
+    result = client.post("/api/editor/open", json={"root": "other", "path": "file.py"})
+    assert result.status_code == 200, result.text
+    assert launched[0][0] == [sys.executable, str(other / "file.py")]
+    assert launched[0][1]["cwd"] == str(other)

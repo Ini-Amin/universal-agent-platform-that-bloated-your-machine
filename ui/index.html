@@ -112,6 +112,15 @@
             <button id="btn-zoom-fit" class="btn" title="Fit all nodes in view">Fit</button>
             <button id="btn-zoom-reset" class="btn" title="Reset Zoom">100%</button>
             <span class="toolbar-sep"></span>
+            <!-- [SplitPane] Layout: free canvas (default) or 2/4 regions. The
+                 stage persists the choice; the active button mirrors state on
+                 load and on clicks, not just one or the other. -->
+            <div class="stage-layout-group" role="group" aria-label="Stage layout">
+              <button id="btn-layout-free" class="btn btn-layout" data-layout="0" aria-pressed="true" title="Free canvas (default)">Free</button>
+              <button id="btn-layout-2" class="btn btn-layout" data-layout="2" aria-pressed="false" title="Split into 2 regions">Split&nbsp;2</button>
+              <button id="btn-layout-4" class="btn btn-layout" data-layout="4" aria-pressed="false" title="Split into 4 regions">Split&nbsp;4</button>
+            </div>
+            <span class="toolbar-sep"></span>
             <button id="btn-toggle-sidebar" class="btn" title="Hide the left sidebar (Ctrl+B)">◧ Side</button>
             <button id="btn-toggle-inspector" class="btn" title="Hide the right panel (Ctrl+I)">Panel ◨</button>
             <span class="toolbar-sep"></span>
@@ -402,6 +411,31 @@
     // dependency-free; the editor builder is injected here. If Monaco cannot
     // load, editor.js falls back to the textarea and says so in the status bar.
     setEditorBodyBuilder(buildEditorBody);
+
+    // [SplitPane] Layout segmented control: free canvas (default), 2 or 4
+    // regions. The stage persists the choice across reloads, so the active
+    // button reflects the restored state on load, not only clicks.
+    const layoutButtons = Array.from(document.querySelectorAll('.btn-layout'));
+    const syncLayoutButtons = () => {
+      const mode = typeof stage.getSplitMode === 'function' ? stage.getSplitMode() : 0;
+      for (const btn of layoutButtons) {
+        const active = Number(btn.dataset.layout) === mode;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+    };
+    for (const btn of layoutButtons) {
+      btn.addEventListener('click', () => {
+        if (typeof stage.setSplitMode !== 'function') return;
+        stage.setSplitMode(Number(btn.dataset.layout));
+        syncLayoutButtons();
+      });
+    }
+    syncLayoutButtons();
+    // [CanvasWS] one socket per tab: the server pushes canvas commands
+    // (open_file / add_view / focus_view) to this stage, and the stage reports
+    // its view set back. Reconnects with backoff if the server reloads.
+    stage.connectCanvas();
     const stripEl = document.getElementById('node-strip');
     const stripListEl = document.getElementById('node-strip-list');
     const stripRevealEl = document.getElementById('strip-reveal');

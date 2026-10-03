@@ -66,11 +66,14 @@ import subprocess
 from typing import Any, Callable
 
 from fastapi import APIRouter, WebSocket
+from fastapi import Depends
 from starlette.websockets import WebSocketDisconnect
 
 from uap.sandbox.executor import Sandbox, SandboxPolicy, SandboxViolation
+from uap.server.auth import require_token
 
 __all__ = [
+    "CanvasHub",
     "DEFAULT_MAX_OUTPUT_BYTES",
     "DEFAULT_TERMINAL_TIMEOUT",
     "MAX_CONCURRENT_TERMINAL_SESSIONS",
@@ -80,6 +83,7 @@ __all__ = [
     "router",
     "ws_execution",
     "ws_terminal",
+    "ws_canvas",
 ]
 
 DEFAULT_TERMINAL_TIMEOUT: float = 10.0
@@ -526,19 +530,81 @@ async def ws_execution(
         mgr.disconnect(execution_id, websocket)
 
 
+class CanvasHub:
+    """Per-app live browser canvases and their latest reported state."""
+
+    def __init__(self) -> None:
+        self._clients: dict[Any, dict[str, Any] | None] = {}
+        self._send_locks: dict[Any, asyncio.Lock] = {}
+
+    def connect(self, websocket: Any) -> None:
+        self._clients[websocket] = None
+        self._send_locks[websocket] = asyncio.Lock()
+
+    def disconnect(self, websocket: Any) -> None:
+        self._clients.pop(websocket, None)
+        self._send_locks.pop(websocket, None)
+
+    def update_state(self, websocket: Any, state: dict[str, Any]) -> None:
+        if websocket in self._clients:
+            self._clients[websocket] = state
+
+    def states(self) -> list[dict[str, Any]]:
+        return [state for state in self._clients.values() if state is not None]
+
+    async def broadcast(self, commands: list[dict[str, Any]]) -> int:
+        """Return the number of clients receiving the entire command batch."""
+        delivered = 0
+        for ws in list(self._clients):
+            try:
+                async with self._send_locks[ws]:
+                    for command in commands:
+                        await ws.send_json(command)
+                delivered += 1
+            except (Exception, asyncio.CancelledError):
+                self.disconnect(ws)
+        return delivered
+
+
+async def ws_canvas(websocket: WebSocket, hub: CanvasHub) -> None:
+    await websocket.accept()
+    hub.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if isinstance(data, dict) and data.get("type") == "hello":
+                views = data.get("views")
+                focused = data.get("focused")
+                if isinstance(views, list) and (focused is None or isinstance(focused, str)):
+                    hub.update_state(websocket, {
+                        "views": [view for view in views if isinstance(view, dict)],
+                        "focused": focused,
+                    })
+    except (WebSocketDisconnect, ValueError, RuntimeError):
+        pass
+    finally:
+        hub.disconnect(websocket)
+
+
 def build_ws_router(
     service_factory: Callable[[], Any] | Any = None,
     manager: ConnectionManager | None = None,
     terminal_tracker: TerminalSessionTracker | None = None,
     workspace_dir: Path | str | None = None,
+    canvas_hub: CanvasHub | None = None,
 ) -> APIRouter:
     ws_router = APIRouter()
     mgr = manager or _default_manager
     t_tracker = terminal_tracker or _default_terminal_tracker
+    canvas = canvas_hub or CanvasHub()
 
     @ws_router.websocket("/ws/terminal")
     async def terminal_endpoint(websocket: WebSocket) -> None:
         await ws_terminal(websocket, workspace_dir=workspace_dir, session_tracker=t_tracker)
+
+    @ws_router.websocket("/ws/canvas", dependencies=[Depends(require_token)])
+    async def canvas_endpoint(websocket: WebSocket) -> None:
+        await ws_canvas(websocket, canvas)
 
     @ws_router.websocket("/ws/executions/{execution_id}")
     async def ws_endpoint(websocket: WebSocket, execution_id: str) -> None:

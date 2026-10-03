@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from uap.tools.registry import ToolRegistry, ToolSpec
+from uap.tools.canvas import canvas_commands, canvas_state
 
 MAX_READ_BYTES = 64 * 1024
 
@@ -106,5 +107,7 @@ def register_local_tools(registry: ToolRegistry, artifacts_root: Path) -> None:
         write_artifact_file(artifacts_root),
         read_text_file(artifacts_root),
         echo(),
+        canvas_commands(),
+        canvas_state(),
     ):
         registry.register(spec, fn)

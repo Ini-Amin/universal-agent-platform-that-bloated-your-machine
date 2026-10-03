@@ -565,6 +565,15 @@ export function buildTerminalBody(body, spec, emit = () => {}) {
 // on its own. When no builder is injected (or the injected builder throws) the
 // honest textarea fallback below is used -- never a blank panel.
 let _editorBodyBuilder = null;
+// [CanvasWS] optional open_file handler for the canvas socket: the real
+// Monaco editor (ui/js/editor.js) injects window.uapOpenWorkspaceFile, and
+// index.html may also call setCanvasFileOpener(fn). fn(path, root) returns
+// false when it could not handle the open (its view is hidden), in which case
+// stage.js opens its own editor view on the file.
+let _canvasFileOpener = null;
+export function setCanvasFileOpener(fn) {
+  _canvasFileOpener = typeof fn === 'function' ? fn : null;
+}
 
 export function setEditorBodyBuilder(fn) {
   _editorBodyBuilder = typeof fn === 'function' ? fn : null;
@@ -914,6 +923,44 @@ export function createStage(containerEl) {
   const MIN_CARD_H = 200;
   const sizes = new Map(); // id -> { w, h }
 
+  // [SplitPane] Region layout state. Free canvas (mode 0) is the default and
+  // keeps every existing behaviour untouched. Mode 2 / 4 lays the stage out as
+  // a CSS grid of regions: cards are re-parented into region elements (they
+  // stay ordinary absolutely-positioned cards in region-local coordinates) and
+  // can be dragged across regions; dividers drag the region ratios. Mode,
+  // ratios and per-view region assignments are persisted so a reload restores
+  // the layout.
+  const SPLIT_KEY = 'uap.stage.split';
+  const SPLIT_MIN_FRACTION = 0.15;
+
+  function loadSplitMode() {
+    const raw = getStorage(`${SPLIT_KEY}.mode`);
+    const mode = raw === null ? 0 : Number(raw);
+    return mode === 2 || mode === 4 ? mode : 0;
+  }
+
+  function loadSplitRatios() {
+    const clamp = (v) => (typeof v === 'number' && isFinite(v) ? Math.min(Math.max(v, SPLIT_MIN_FRACTION), 1 - SPLIT_MIN_FRACTION) : 0.5);
+    const raw = getStorage(`${SPLIT_KEY}.ratios`);
+    if (raw) {
+      try {
+        const p = JSON.parse(raw);
+        return { x: clamp(p?.x), y: clamp(p?.y) };
+      } catch (_e) {}
+    }
+    return { x: 0.5, y: 0.5 };
+  }
+
+  let splitMode = loadSplitMode();
+  let splitRatios = loadSplitRatios();
+  let focusedViewId = null;
+  const splitRegions = new Map(); // id -> region index
+  const splitPositions = new Map(); // id -> { x, y } region-local
+  let regionEls = [];
+  let splitDividers = [];
+  let resizingSplit = null; // { axis: 'x' | 'y', rect }
+  let splitDropRegion = -1; // region under the pointer while a card is dragged
+
   // [InfiniteCanvas] Storage helpers (safe for LinkeDOM / SSR / private mode)
   function getStorage(key) {
     try {
@@ -979,6 +1026,12 @@ export function createStage(containerEl) {
 
   function applyViewport() {
     if (filledViewId) return; // Fill mode takes over whole container
+    if (splitMode) {
+      // [SplitPane] Regions are sized by the CSS grid and the dividers; the
+      // pan/zoom transform of the free canvas must not apply.
+      grid.style.transform = 'none';
+      return;
+    }
     grid.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
     grid.style.transformOrigin = '0 0';
     const bgSize = Math.max(12, Math.round(24 * viewport.zoom));
@@ -1121,6 +1174,256 @@ export function createStage(containerEl) {
     return { x: originX, y: originY };
   }
 
+  // [SplitPane] -----------------------------------------------------------------
+  function rectOf(el) {
+    if (el && typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (r) return { left: r.left || 0, top: r.top || 0, width: r.width || 0, height: r.height || 0 };
+    }
+    return { left: 0, top: 0, width: 0, height: 0 };
+  }
+
+  function fr(v) {
+    return `${(Math.round(v * 1000) / 1000)}fr`;
+  }
+
+  function persistSplit() {
+    setStorage(`${SPLIT_KEY}.mode`, String(splitMode));
+    setStorage(`${SPLIT_KEY}.ratios`, JSON.stringify(splitRatios));
+  }
+
+  function regionOf(id) {
+    const r = splitRegions.get(String(id));
+    if (typeof r === 'number' && r >= 0 && r < splitMode) return r;
+    return 0;
+  }
+
+  function loadSplitRegion(id) {
+    const raw = getStorage(`${SPLIT_KEY}.region.${id}`);
+    const r = raw === null ? 0 : Number(raw);
+    return Number.isFinite(r) && r >= 0 && r < splitMode ? r : 0;
+  }
+
+  function loadSplitPosition(id) {
+    const raw = getStorage(`${SPLIT_KEY}.pos.${id}`);
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw);
+      if (typeof p?.x === 'number' && typeof p?.y === 'number') return { x: p.x, y: p.y };
+    } catch (_e) {}
+    return null;
+  }
+
+  function countCardsInRegion(region) {
+    let n = 0;
+    for (const id of views.keys()) {
+      if (regionOf(id) === region) n += 1;
+    }
+    return n;
+  }
+
+  // A card entering a region without a remembered position cascades so every
+  // card in the region stays visible (no two land on the same pixel).
+  // ponytail: drop cards exactly at the pointer if a UX pass calls for it.
+  function splitCascadePos(region) {
+    const step = 28;
+    const n = countCardsInRegion(region) % 4;
+    return { x: 16 + n * step, y: 16 + n * step };
+  }
+
+  function clampPosToRegion(cardEl, region, pos) {
+    const rect = rectOf(regionEls[region]);
+    const w = (cardEl && cardEl.offsetWidth) || 0;
+    const h = (cardEl && cardEl.offsetHeight) || 0;
+    return {
+      x: Math.round(Math.min(Math.max(pos.x, 0), Math.max(0, rect.width - w))),
+      y: Math.round(Math.min(Math.max(pos.y, 0), Math.max(0, rect.height - h))),
+    };
+  }
+
+  function removeSplitChrome() {
+    for (const el of regionEls) el.remove();
+    for (const el of splitDividers) el.remove();
+    regionEls = [];
+    splitDividers = [];
+    grid.classList.remove('stage-grid-split', 'stage-grid-split-2', 'stage-grid-split-4');
+    containerEl.classList.remove('stage-split-active');
+  }
+
+  function buildSplitChrome() {
+    removeSplitChrome();
+    if (!splitMode) return;
+    const place = (el, col, row) => {
+      el.style.gridColumn = String(col);
+      el.style.gridRow = String(row);
+    };
+    for (let r = 0; r < splitMode; r += 1) {
+      const el = document.createElement('div');
+      el.className = 'stage-region';
+      el.dataset.region = String(r);
+      const label = document.createElement('span');
+      label.className = 'stage-region-label';
+      label.textContent = `Region ${r + 1}`;
+      el.appendChild(label);
+      grid.appendChild(el);
+      regionEls.push(el);
+    }
+    // Grid tracks: [region] [divider] [region] (x 2 rows in quad mode), so the
+    // dividers are real grid items and resize natively with the regions.
+    place(regionEls[0], 1, 1);
+    place(regionEls[1], 3, 1);
+    if (splitMode === 4) {
+      place(regionEls[2], 1, 3);
+      place(regionEls[3], 3, 3);
+    }
+    const vDivider = document.createElement('div');
+    vDivider.className = 'stage-split-divider';
+    vDivider.dataset.axis = 'x';
+    vDivider.setAttribute('role', 'separator');
+    vDivider.setAttribute('aria-orientation', 'vertical');
+    vDivider.setAttribute('aria-label', 'Resize regions horizontally');
+    place(vDivider, 2, '1 / -1');
+    grid.appendChild(vDivider);
+    splitDividers.push(vDivider);
+    if (splitMode === 4) {
+      const hDivider = document.createElement('div');
+      hDivider.className = 'stage-split-divider';
+      hDivider.dataset.axis = 'y';
+      hDivider.setAttribute('role', 'separator');
+      hDivider.setAttribute('aria-orientation', 'horizontal');
+      hDivider.setAttribute('aria-label', 'Resize regions vertically');
+      place(hDivider, '1 / -1', 2);
+      grid.appendChild(hDivider);
+      splitDividers.push(hDivider);
+    }
+    grid.classList.add('stage-grid-split', splitMode === 4 ? 'stage-grid-split-4' : 'stage-grid-split-2');
+    containerEl.classList.add('stage-split-active');
+    applySplitRatios();
+  }
+
+  function applySplitRatios() {
+    if (!splitMode) return;
+    grid.style.setProperty('--split-x', fr(splitRatios.x));
+    grid.style.setProperty('--split-x2', fr(1 - splitRatios.x));
+    grid.style.setProperty('--split-y', fr(splitRatios.y));
+    grid.style.setProperty('--split-y2', fr(1 - splitRatios.y));
+  }
+
+  // Place one card inside its region. `pos` wins for drops; otherwise the
+  // remembered region-local position or the cascade default is used.
+  function placeCardInRegion(id, region, pos) {
+    const targetId = String(id);
+    const entry = views.get(targetId);
+    if (!entry) return;
+    const regionEl = regionEls[region] || regionEls[0];
+    if (regionEl && entry.cardEl.parentElement !== regionEl) {
+      regionEl.appendChild(entry.cardEl);
+    }
+    const next = pos
+      ? clampPosToRegion(entry.cardEl, region, pos)
+      : (loadSplitPosition(targetId) || splitCascadePos(region));
+    splitPositions.set(targetId, next);
+    setStorage(`${SPLIT_KEY}.region.${targetId}`, String(region));
+    setStorage(`${SPLIT_KEY}.pos.${targetId}`, JSON.stringify(next));
+    entry.cardEl.style.left = `${next.x}px`;
+    entry.cardEl.style.top = `${next.y}px`;
+  }
+
+  function layoutSplitCards() {
+    for (const id of views.keys()) {
+      placeCardInRegion(id, loadSplitRegion(id));
+    }
+  }
+
+  // Route a (re)created card into its region when in split mode. In free mode
+  // this is a no-op: the card stays exactly where showView put it.
+  function splitRouteView(id, spec) {
+    if (!splitMode) return;
+    const region = loadSplitRegion(id);
+    splitRegions.set(id, region);
+    const pos = (spec && spec.position && typeof spec.position.x === 'number' && typeof spec.position.y === 'number')
+      ? { x: Math.round(spec.position.x), y: Math.round(spec.position.y) }
+      : null;
+    placeCardInRegion(id, region, pos);
+  }
+
+  function setSplitDropTarget(region) {
+    if (splitDropRegion === region) return;
+    if (splitDropRegion >= 0 && regionEls[splitDropRegion]) {
+      regionEls[splitDropRegion].classList.remove('is-drop-target');
+    }
+    splitDropRegion = region;
+    if (splitDropRegion >= 0 && regionEls[splitDropRegion]) {
+      regionEls[splitDropRegion].classList.add('is-drop-target');
+    }
+  }
+
+  function regionAtPoint(clientX, clientY) {
+    for (let r = 0; r < regionEls.length; r += 1) {
+      const rect = rectOf(regionEls[r]);
+      if (clientX >= rect.left && clientX <= rect.left + rect.width
+        && clientY >= rect.top && clientY <= rect.top + rect.height) {
+        return r;
+      }
+    }
+    return -1;
+  }
+
+  function setSplitRatio(axis, fraction) {
+    if (!splitMode) return;
+    const alpha = Math.min(Math.max(fraction, SPLIT_MIN_FRACTION), 1 - SPLIT_MIN_FRACTION);
+    splitRatios = { ...splitRatios, [axis]: Math.round(alpha * 1000) / 1000 };
+    applySplitRatios();
+    persistSplit();
+  }
+
+  function setSplitMode(mode) {
+    const next = (mode === 2 || mode === 4) ? mode : 0;
+    const changed = next !== splitMode;
+    splitMode = next;
+    persistSplit();
+    if (splitMode) {
+      buildSplitChrome();
+      layoutSplitCards();
+    } else {
+      removeSplitChrome();
+      // Back to the infinite plane: every card returns to the grid at its
+      // free-canvas position with its persisted size.
+      for (const id of views.keys()) {
+        const entry = views.get(id);
+        if (!entry) continue;
+        grid.appendChild(entry.cardEl);
+        const pos = positions.get(id) || { x: 0, y: 0 };
+        entry.cardEl.style.left = `${pos.x}px`;
+        entry.cardEl.style.top = `${pos.y}px`;
+        const size = sizes.get(id);
+        if (size) applyCardSize(entry.cardEl, id);
+      }
+    }
+    applyViewport();
+    if (changed) emit({ type: 'split', mode: splitMode });
+  }
+
+  function getSplitMode() {
+    return splitMode;
+  }
+
+  function setViewRegion(id, region) {
+    if (!splitMode) return false;
+    const targetId = String(id);
+    if (!views.has(targetId)) return false;
+    const next = Math.min(Math.max(Number(region) || 0, 0), splitMode - 1);
+    splitRegions.set(targetId, next);
+    placeCardInRegion(targetId, next);
+    emit({ type: 'region', id: targetId, region: next });
+    return true;
+  }
+
+  function getViewRegion(id) {
+    if (!splitMode) return null;
+    return regionOf(id);
+  }
+
   // [InfiniteCanvas] Floating zoom controls UI
   const zoomControls = document.createElement('div');
   zoomControls.className = 'stage-zoom-controls';
@@ -1250,6 +1553,7 @@ export function createStage(containerEl) {
   }
 
   function zoomAt(factor, cx, cy) {
+    if (splitMode) return; // [SplitPane] the region grid has no transform to zoom
     const newZoom = Math.min(Math.max(viewport.zoom * factor, MIN_ZOOM), MAX_ZOOM);
     if (Math.abs(newZoom - viewport.zoom) < 0.001) return;
     const k = newZoom / viewport.zoom;
@@ -1291,6 +1595,7 @@ export function createStage(containerEl) {
   }
 
   function fitToView() {
+    if (splitMode) return; // [SplitPane] nothing to fit: the grid owns the layout
     if (positions.size === 0) {
       resetView();
       return;
@@ -1394,6 +1699,7 @@ export function createStage(containerEl) {
   // [InfiniteCanvas] Wheel zoom handler
   containerEl.addEventListener('wheel', (e) => {
     if (filledViewId) return;
+    if (splitMode) return; // [SplitPane] regions are sized by the dividers
     if (resizingCard) return; // a resize must not zoom the canvas
     const onCardBody = e.target.closest('.stage-card-body');
     if (onCardBody && !e.ctrlKey && !e.metaKey) {
@@ -1413,7 +1719,18 @@ export function createStage(containerEl) {
   containerEl.addEventListener('mousedown', (e) => {
     if (filledViewId) return;
 
-    // 0. Resizing a card by its corner handle. This runs before both the
+    // [SplitPane] 0. Dragging a region divider. Runs before everything else so
+    // a divider grab never drags a card or pans a region.
+    const divider = e.target.closest('.stage-split-divider');
+    if (divider) {
+      resizingSplit = { axis: divider.dataset.axis === 'y' ? 'y' : 'x', rect: rectOf(grid) };
+      containerEl.classList.add('stage-split-resizing');
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    // 1. Resizing a card by its corner handle. This runs before both the
     //    titlebar drag and the canvas pan so a resize never does either.
     const resizeHandle = e.target.closest('.stage-card-resize');
     if (resizeHandle) {
@@ -1457,8 +1774,18 @@ export function createStage(containerEl) {
 
       topZ += 1;
       card.style.zIndex = String(topZ);
+      focusedViewId = viewId; // [CanvasWS] click = focus: resync the hello snapshot
+      scheduleHello();
 
-      const pos = positions.get(viewId) || { x: card.offsetLeft || 0, y: card.offsetTop || 0 };
+      // [SplitPane] In split mode the base position is region-local and the
+      // grab offset is remembered so a cross-region drop lands under the cursor.
+      let pos;
+      if (splitMode) {
+        pos = splitPositions.get(viewId) || { x: card.offsetLeft || 0, y: card.offsetTop || 0 };
+      } else {
+        pos = positions.get(viewId) || { x: card.offsetLeft || 0, y: card.offsetTop || 0 };
+      }
+      const cardRect = rectOf(card);
       draggingCard = {
         id: viewId,
         cardEl: card,
@@ -1466,19 +1793,22 @@ export function createStage(containerEl) {
         startY: e.clientY,
         cardX: pos.x,
         cardY: pos.y,
+        grabOffsetX: e.clientX - cardRect.left,
+        grabOffsetY: e.clientY - cardRect.top,
       };
       hasCardMoved = false;
       containerEl.classList.add('stage-dragging');
+      if (splitMode) containerEl.classList.add('stage-card-split-dragging');
       e.preventDefault();
       return;
     }
 
-    // 2. Pan canvas
+    // 2. Pan canvas (free canvas only; regions are laid out by the grid)
     const isInsideCard = Boolean(e.target.closest('.stage-card'));
     const isInsideControls = Boolean(e.target.closest('.stage-zoom-controls'));
     if (isInsideControls) return;
 
-    if (!isInsideCard || e.button === 1 || isSpaceDown) {
+    if (!splitMode && (!isInsideCard || e.button === 1 || isSpaceDown)) {
       if (e.button === 0 || e.button === 1) {
         isPanning = true;
         panStart = { x: e.clientX, y: e.clientY };
@@ -1489,18 +1819,34 @@ export function createStage(containerEl) {
   });
 
   const onWindowMouseMove = (e) => {
-    if (resizingCard) {
+    if (resizingSplit) {
+      // [SplitPane] A divider drag only moves the region ratio.
+      const { axis, rect } = resizingSplit;
+      const span = axis === 'x' ? rect.width : rect.height;
+      if (span > 0) {
+        const frac = (axis === 'x' ? e.clientX - rect.left : e.clientY - rect.top) / span;
+        setSplitRatio(axis, frac);
+      }
+    } else if (resizingCard) {
       hasCardResized = true;
       const dx = (e.clientX - resizingCard.startX) / viewport.zoom;
       const dy = (e.clientY - resizingCard.startY) / viewport.zoom;
       setCardSize(resizingCard.id, resizingCard.startW + dx, resizingCard.startH + dy, { persist: false });
     } else if (draggingCard) {
       hasCardMoved = true;
-      const dx = (e.clientX - draggingCard.startX) / viewport.zoom;
-      const dy = (e.clientY - draggingCard.startY) / viewport.zoom;
+      // [SplitPane] Region-local coordinates are unscaled: the grid has no
+      // transform, so a 1:1 pixel mapping is the correct one.
+      const zoom = splitMode ? 1 : viewport.zoom;
+      const dx = (e.clientX - draggingCard.startX) / zoom;
+      const dy = (e.clientY - draggingCard.startY) / zoom;
       const newX = Math.round(draggingCard.cardX + dx);
       const newY = Math.round(draggingCard.cardY + dy);
-      positions.set(draggingCard.id, { x: newX, y: newY });
+      if (splitMode) {
+        splitPositions.set(draggingCard.id, { x: newX, y: newY });
+        setSplitDropTarget(regionAtPoint(e.clientX, e.clientY));
+      } else {
+        positions.set(draggingCard.id, { x: newX, y: newY });
+      }
       draggingCard.cardEl.style.left = `${newX}px`;
       draggingCard.cardEl.style.top = `${newY}px`;
     } else if (isPanning) {
@@ -1513,7 +1859,13 @@ export function createStage(containerEl) {
     }
   };
 
-  const onWindowMouseUp = () => {
+  const onWindowMouseUp = (e) => {
+    if (resizingSplit) {
+      resizingSplit = null;
+      containerEl.classList.remove('stage-split-resizing');
+      setStorage(`${SPLIT_KEY}.ratios`, JSON.stringify(splitRatios));
+      emit({ type: 'ratio', ratios: { ...splitRatios } });
+    }
     if (resizingCard) {
       containerEl.classList.remove('stage-resizing');
       const size = sizes.get(resizingCard.id);
@@ -1528,11 +1880,38 @@ export function createStage(containerEl) {
     }
     if (draggingCard) {
       containerEl.classList.remove('stage-dragging');
-      const pos = positions.get(draggingCard.id);
-      if (pos) {
-        setStorage(`uap.stage.pos.${draggingCard.id}`, JSON.stringify(pos));
-        if (hasCardMoved) {
-          emit({ type: 'move', id: draggingCard.id, position: pos });
+      const id = draggingCard.id;
+      if (splitMode) {
+        containerEl.classList.remove('stage-card-split-dragging');
+        // A dragged card lands in whichever region the pointer is over; the
+        // drop point is remembered so a reload puts it back exactly there.
+        const dropRegion = splitDropRegion >= 0 ? splitDropRegion : regionOf(id);
+        setSplitDropTarget(-1);
+        if (dropRegion !== regionOf(id) && views.has(id)) {
+          splitRegions.set(id, dropRegion);
+          const rect = rectOf(regionEls[dropRegion]);
+          const clientX = e && typeof e.clientX === 'number' ? e.clientX : rect.left + rect.width / 2;
+          const clientY = e && typeof e.clientY === 'number' ? e.clientY : rect.top + rect.height / 2;
+          placeCardInRegion(id, dropRegion, {
+            x: clientX - rect.left - (draggingCard.grabOffsetX || 0),
+            y: clientY - rect.top - (draggingCard.grabOffsetY || 0),
+          });
+          emit({ type: 'region', id, region: dropRegion });
+        } else {
+          const pos = splitPositions.get(id);
+          if (pos) setStorage(`${SPLIT_KEY}.pos.${id}`, JSON.stringify(pos));
+        }
+        const finalPos = splitPositions.get(id) || null;
+        if (hasCardMoved && finalPos) {
+          emit({ type: 'move', id, position: finalPos, region: regionOf(id) });
+        }
+      } else {
+        const pos = positions.get(id);
+        if (pos) {
+          setStorage(`uap.stage.pos.${id}`, JSON.stringify(pos));
+          if (hasCardMoved) {
+            emit({ type: 'move', id, position: pos });
+          }
         }
       }
       draggingCard = null;
@@ -1580,6 +1959,279 @@ export function createStage(containerEl) {
     for (const cb of listeners) {
       try { cb(event); } catch (err) { console.error('stage listener error:', err); }
     }
+    // [CanvasWS] every structural/focus change re-syncs the canvas snapshot
+    // (debounced; no-op when no socket is wired).
+    scheduleHello();
+  }
+
+  // [CanvasWS] -----------------------------------------------------------------
+  // One WebSocket per tab to /ws/canvas. The server pushes canvas commands
+  // (open_file / add_view / focus_view) and this stage reports what is on
+  // screen with a `hello` snapshot: on connect, on every structural change
+  // (emit), on focus changes and on editor file/root changes (an editor
+  // re-open is a `showView` with the same id, which emits `update`).
+  //
+  // Auth is opt-in (src/uap/server/auth.py): the bearer token the REST UI keeps
+  // in localStorage under 'uap_api_token' is reused. A browser WebSocket cannot
+  // set headers, so it rides the `?token=` query parameter the server checks
+  // (same convention as the terminal socket in ui/js/terminal.js).
+  //
+  // A reloaded/redeployed server must not leave the tab dead: the socket
+  // reconnects with exponential backoff until the page is unloaded.
+  const CANVAS_WS_PATH = '/ws/canvas';
+  const CANVAS_RECONNECT_BASE_MS = 500;
+  const CANVAS_RECONNECT_MAX_MS = 5000;
+  const CANVAS_HELLO_DEBOUNCE_MS = 150;
+
+  let canvasSocket = null;
+  let canvasReconnectTimer = null;
+  let canvasReconnectDelay = CANVAS_RECONNECT_BASE_MS;
+  let canvasClosedIntentionally = false;
+  let helloTimer = null;
+
+  function canvasToken() {
+    return getStorage('uap_api_token') || '';
+  }
+
+  function canvasSocketUrl() {
+    const loc = (typeof window !== 'undefined') ? window.location : null;
+    const secure = Boolean(loc) && loc.protocol === 'https:';
+    const proto = secure ? 'wss:' : 'ws:';
+    const host = (loc && loc.host) || '127.0.0.1:8090';
+    const token = canvasToken();
+    return `${proto}//${host}${CANVAS_WS_PATH}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  }
+
+  // Ring buffer of the last frames, in both directions: the dev/con panels
+  // (window.__canvasMessages / window.__lastCanvasMessage) can then show what
+  // the canvas channel actually exchanged without a proxy.
+  function captureCanvasMessage(direction, payload) {
+    if (typeof window === 'undefined') return;
+    try {
+      window.__lastCanvasMessage = { direction, payload };
+      const ring = Array.isArray(window.__canvasMessages) ? window.__canvasMessages : [];
+      ring.push({ direction, payload });
+      window.__canvasMessages = ring.slice(-20);
+    } catch (_e) {}
+  }
+
+  function wsOpenState() {
+    return typeof WebSocket !== 'undefined' ? WebSocket.OPEN : 1;
+  }
+
+  function canvasOpen() {
+    return Boolean(canvasSocket) && canvasSocket.readyState === wsOpenState();
+  }
+
+  function editorInstanceOf(entry) {
+    if (!entry || !entry.cardEl || typeof entry.cardEl.querySelector !== 'function') return null;
+    const body = entry.cardEl.querySelector('.stage-card-body');
+    return (body && body.__editor) || null;
+  }
+
+  // Open path/root per card: from the injected editor when it exposes one,
+  // otherwise from the view spec it was created/updated with (buildEditorBody
+  // loads spec.path, and an editor re-open replaces the card).
+  function viewOpenPath(entry) {
+    const editor = editorInstanceOf(entry);
+    if (editor && typeof editor.getPath === 'function') {
+      const p = editor.getPath();
+      if (p) return p;
+    }
+    return (entry.spec && entry.spec.path) || null;
+  }
+
+  function viewOpenRoot(entry) {
+    const editor = editorInstanceOf(entry);
+    if (editor && typeof editor.getRoot === 'function') return editor.getRoot();
+    return (entry.spec && entry.spec.root) || null;
+  }
+
+  function helloPayload() {
+    const focused = focusedViewId && views.has(focusedViewId) ? focusedViewId : null;
+    return {
+      type: 'hello',
+      views: Array.from(views.values()).map((entry) => {
+        const view = { id: entry.spec.__id, type: entry.spec.kind, title: titleFor(entry.spec) };
+        const path = viewOpenPath(entry);
+        const root = viewOpenRoot(entry);
+        if (path) view.path = path;
+        if (root) view.root = root;
+        return view;
+      }),
+      focused,
+    };
+  }
+
+  function sendHello() {
+    if (!canvasOpen()) return;
+    const hello = helloPayload();
+    try {
+      canvasSocket.send(JSON.stringify(hello));
+      captureCanvasMessage('out', hello);
+    } catch (_e) {}
+  }
+
+  // Debounced: a burst of structural events (open + split switch + region move)
+  // must not spam one snapshot per card.
+  function scheduleHello() {
+    if (helloTimer || typeof setTimeout !== 'function') return;
+    helloTimer = setTimeout(() => {
+      helloTimer = null;
+      sendHello();
+    }, CANVAS_HELLO_DEBOUNCE_MS);
+  }
+
+  function onCanvasMessage(event) {
+    const data = event && event.data;
+    if (typeof data !== 'string') return;
+    let msg;
+    try {
+      msg = JSON.parse(data);
+    } catch (_e) {
+      return; // not JSON: ignore, the channel stays usable
+    }
+    if (!msg || typeof msg !== 'object') return;
+    captureCanvasMessage('in', msg);
+    if (msg.type === 'open_file') {
+      handleCanvasOpenFile(msg);
+    } else if (msg.type === 'add_view') {
+      const spec = (msg.spec && typeof msg.spec === 'object')
+        ? msg.spec
+        : (msg.view && typeof msg.view === 'object' ? msg.view : null);
+      if (spec && spec.kind) showView(spec);
+    } else if (msg.type === 'focus_view') {
+      const id = msg.view_id || msg.id;
+      if (id) focusView(id);
+    }
+    // `hello` and unknown types are ignored: this socket is a command channel,
+    // not a second source of truth for the canvas state.
+  }
+
+  // open_file: prefer the injected editor (window.uapOpenWorkspaceFile, wired by
+  // editor.js) so the file opens in the real Monaco-backed view; `false` means
+  // its owning body is hidden, so stage.js opens its own editor view on the
+  // same path instead of dropping the command.
+  function canvasFileOpener() {
+    if (_canvasFileOpener) return (path, root) => _canvasFileOpener(path, root);
+    if (typeof window !== 'undefined' && typeof window.uapOpenWorkspaceFile === 'function') {
+      return (path, root) => window.uapOpenWorkspaceFile(path, root);
+    }
+    return null;
+  }
+
+  function handleCanvasOpenFile(msg) {
+    const path = typeof msg.path === 'string' ? msg.path : (typeof msg.file === 'string' ? msg.file : null);
+    if (!path) return;
+    const root = typeof msg.root === 'string' ? msg.root : undefined;
+    const opener = canvasFileOpener();
+    if (opener) {
+      let result;
+      try {
+        result = opener(path, root);
+      } catch (err) {
+        result = false;
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('canvas open_file handler failed; opening an editor view', err);
+        }
+      }
+      if (result !== false && result !== null && result !== undefined) return; // handled (a promise counts)
+    }
+    // Fallback: reuse the path-keyed editor view, or the one editor view that
+    // has no file yet, so repeated open_file commands land in the same card.
+    const name = path.split('/').pop() || path;
+    let id = `file:${path}`;
+    if (!views.has(id)) {
+      const editorView = Array.from(views.values())
+        .find((entry) => entry.spec && entry.spec.kind === 'editor' && !entry.spec.path);
+      if (editorView) id = editorView.spec.__id;
+    }
+    showView({
+      id,
+      kind: 'editor',
+      path,
+      root,
+      filename: name,
+      title: name,
+    });
+  }
+
+  function focusView(id) {
+    const targetId = String(id);
+    if (!views.has(targetId)) return false;
+    focusedViewId = targetId;
+    const entry = views.get(targetId);
+    topZ += 1;
+    entry.cardEl.style.zIndex = String(topZ);
+    emit({ type: 'focus', id: targetId });
+    scheduleHello();
+    return true;
+  }
+
+  function getFocusedViewId() {
+    return focusedViewId && views.has(focusedViewId) ? focusedViewId : null;
+  }
+
+  function connectCanvas() {
+    if (canvasSocket) return canvasSocket;
+    if (typeof WebSocket === 'undefined') return null;
+    if (typeof setTimeout !== 'function' || typeof clearTimeout !== 'function') return null;
+    canvasClosedIntentionally = false;
+    let ws;
+    try {
+      ws = new WebSocket(canvasSocketUrl());
+    } catch (_e) {
+      return null; // bad URL / disabled transport: stay on the free canvas
+    }
+    canvasSocket = ws;
+    ws.onopen = () => {
+      canvasReconnectDelay = CANVAS_RECONNECT_BASE_MS;
+      sendHello();
+    };
+    ws.onmessage = onCanvasMessage;
+    ws.onerror = () => {}; // close always follows; reconnect is handled there
+    ws.onclose = () => {
+      if (canvasSocket === ws) canvasSocket = null;
+      if (canvasClosedIntentionally) return;
+      // Server reload/redeploy: retry at the current delay (500ms, then
+      // doubling up to 5s) instead of leaving the tab without a canvas.
+      canvasReconnectTimer = setTimeout(() => {
+        canvasReconnectTimer = null;
+        if (!canvasClosedIntentionally) connectCanvas();
+      }, canvasReconnectDelay);
+      canvasReconnectDelay = Math.min(canvasReconnectDelay * 2, CANVAS_RECONNECT_MAX_MS);
+    };
+    captureCanvasMessage('connect', { url: canvasSocketUrl() });
+    return ws;
+  }
+
+  function disconnectCanvas() {
+    canvasClosedIntentionally = true;
+    if (helloTimer && typeof clearTimeout === 'function') {
+      clearTimeout(helloTimer);
+      helloTimer = null;
+    }
+    if (canvasReconnectTimer && typeof clearTimeout === 'function') {
+      clearTimeout(canvasReconnectTimer);
+      canvasReconnectTimer = null;
+    }
+    if (canvasSocket) {
+      const ws = canvasSocket;
+      canvasSocket = null;
+      ws.onclose = null; // no reconnect from an intentional close
+      try {
+        ws.close();
+      } catch (_e) {}
+    }
+  }
+
+  function setCanvasFileOpener(fn) {
+    _canvasFileOpener = typeof fn === 'function' ? fn : null;
+  }
+
+  // Page unload ends the tab for good: stop the reconnect loop too.
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', disconnectCanvas);
   }
 
   function nextId() {
@@ -2122,6 +2774,9 @@ export function createStage(containerEl) {
       if (filledViewId === s.__id) replacement.classList.add('stage-card-filled');
       views.set(s.__id, { spec: s, cardEl: replacement });
       relayoutView(s.__id);
+      // [SplitPane] A replacement card must re-enter its region: showView
+      // re-parented it back onto the free canvas.
+      splitRouteView(s.__id, s);
       emit({ type: 'update', id: s.__id, kind: s.kind, spec: s });
       return s.__id;
     }
@@ -2146,6 +2801,7 @@ export function createStage(containerEl) {
 
     grid.appendChild(card);
     views.set(s.__id, { spec: s, cardEl: card });
+    splitRouteView(s.__id, s);
     emit({ type: 'open', id: s.__id, kind: s.kind, spec: s });
     // [ExcalidrawCanvas] fill mode: enter fill mode if requested by spec
     if (s.fill === true) {
@@ -2169,6 +2825,11 @@ export function createStage(containerEl) {
     sizes.delete(targetId);
     removeStorage(`uap.stage.pos.${targetId}`);
     removeStorage(`uap.stage.size.${targetId}`);
+    splitRegions.delete(targetId);
+    splitPositions.delete(targetId);
+    removeStorage(`${SPLIT_KEY}.region.${targetId}`);
+    removeStorage(`${SPLIT_KEY}.pos.${targetId}`);
+    if (focusedViewId === targetId) focusedViewId = null;
     emit({ type: 'close', id: targetId });
     updateEmptyState();
     return true;
@@ -2195,8 +2856,13 @@ export function createStage(containerEl) {
       sizes.delete(id);
       removeStorage(`uap.stage.pos.${id}`);
       removeStorage(`uap.stage.size.${id}`);
+      splitRegions.delete(id);
+      splitPositions.delete(id);
+      removeStorage(`${SPLIT_KEY}.region.${id}`);
+      removeStorage(`${SPLIT_KEY}.pos.${id}`);
     }
     views.clear();
+    focusedViewId = null;
     emit({ type: 'clear', ids });
     updateEmptyState();
     return ids.length;
@@ -2243,9 +2909,11 @@ export function createStage(containerEl) {
   }
 
   function destroy() {
+    disconnectCanvas();
     if (typeof window !== 'undefined') {
       window.removeEventListener('mousemove', onWindowMouseMove);
       window.removeEventListener('mouseup', onWindowMouseUp);
+      window.removeEventListener('pagehide', disconnectCanvas);
     }
     if (typeof document !== 'undefined') {
       document.removeEventListener('keydown', onKeyDown);
@@ -2274,6 +2942,19 @@ export function createStage(containerEl) {
     // [Resize]
     getCardSize,
     setCardSize,
+    // [SplitPane]
+    setSplitMode,
+    getSplitMode,
+    setSplitRatio,
+    setViewRegion,
+    getViewRegion,
+    // [CanvasWS]
+    connectCanvas,
+    disconnectCanvas,
+    sendHello,
+    focusView,
+    getFocusedViewId,
+    setCanvasFileOpener,
     destroy,
     updateEmptyState,
     getEmptyStateElement: () => emptyStateEl,
@@ -2283,7 +2964,15 @@ export function createStage(containerEl) {
     window.stage = api;
     window.stageApi = api;
   }
+  // [SplitPane] restore a persisted layout around the views index.html opens
   updateEmptyState();
+  if (splitMode) {
+    buildSplitChrome();
+    layoutSplitCards();
+  }
+  // [CanvasWS] the owning page (index.html) wires the one socket per tab, not
+  // the constructor: no socket is opened under SSR / a test harness that
+  // defines WebSocket but has no server.
   return api;
 }
 

@@ -19,6 +19,10 @@
 //   * a file browser that lists the workspace (GET /api/workspace/files),
 //     opens a file (GET /api/workspace/file) and saves it back (POST
 //     /api/workspace/file) -- a real write, not a download;
+//   * multiple browsable roots (GET /api/workspace/roots): the browser header
+//     holds a root picker next to the breadcrumb, every workspace/editor
+//     request carries the active root, and the choice persists in
+//     localStorage; switching roots resets navigation and editor context;
 //   * "Open in Zed": Zed is a native GUI app and cannot be embedded in a
 //     browser, so the server launches it on its own machine (POST
 //     /api/editor/open); availability comes from GET /api/editor/status;
@@ -224,6 +228,28 @@ function _authHeaders() {
   return headers;
 }
 
+// The active workspace root lives in localStorage so the browser reopens on the
+// root the user left it on. The id (never the absolute path) is stored, so a
+// stale selection is simply discarded when the server no longer offers it.
+const ROOT_STORAGE_KEY = 'uap_workspace_root';
+const DEFAULT_ROOT_ID = 'workspace';
+
+function _readPersistedRoot() {
+  try {
+    return localStorage.getItem(ROOT_STORAGE_KEY) || DEFAULT_ROOT_ID;
+  } catch (_e) {
+    return DEFAULT_ROOT_ID;
+  }
+}
+
+function _persistRoot(root) {
+  try {
+    localStorage.setItem(ROOT_STORAGE_KEY, root);
+  } catch (_e) {
+    /* storage disabled: the selection stays session-only */
+  }
+}
+
 async function _jsonRequest(path, options = {}) {
   const res = await fetch(path, { headers: _authHeaders(), ...options });
   let body = null;
@@ -245,18 +271,29 @@ async function _jsonRequest(path, options = {}) {
 
 /** Thin wrappers so callers (and tests) see the exact route shape. */
 export const workspaceApi = {
-  list: (path = '') => _jsonRequest(`/api/workspace/files?path=${encodeURIComponent(path)}`),
-  read: (path) => _jsonRequest(`/api/workspace/file?path=${encodeURIComponent(path)}`),
-  write: (path, content) =>
+  roots: () => _jsonRequest('/api/workspace/roots'),
+  list: (path = '', root) =>
+    _jsonRequest(
+      `/api/workspace/files?path=${encodeURIComponent(path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ''
+      }`,
+    ),
+  read: (path, root) =>
+    _jsonRequest(
+      `/api/workspace/file?path=${encodeURIComponent(path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ''
+      }`,
+    ),
+  write: (path, content, root) =>
     _jsonRequest('/api/workspace/file', {
       method: 'POST',
-      body: JSON.stringify({ path, content }),
+      body: JSON.stringify(root ? { path, content, root } : { path, content }),
     }),
   editorStatus: () => _jsonRequest('/api/editor/status'),
-  openInEditor: (path) =>
+  openInEditor: (path, root) =>
     _jsonRequest('/api/editor/open', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(root ? { path, root } : { path }),
     }),
 };
 
@@ -270,6 +307,14 @@ const DEFAULT_PYTHON = '# Python Sandbox\nprint("Hello from UAP!")\n';
  * Build the editor view. Returns synchronously with a complete shell; Monaco
  * (or its textarea fallback) is attached asynchronously. The returned body
  * exposes `body.__editor` for programmatic access and tests.
+ *
+ * Card API (what other modules should use):
+ *   const body = buildEditorBody(hostEl, spec, emit);
+ *   body.__editor.openFile(path, root?)  // open a file, optionally switching
+ *                                        // to `root` first (see the roots list)
+ *   body.__editor.getRoot() / setRoot(id)
+ * Window hooks with the same call shape: `window.UAP.openFile(path, root?)`
+ * and the canvas-bridge seam `window.uapOpenWorkspaceFile(path, root?)`.
  */
 export function buildEditorBody(body, spec = {}, emit = () => {}) {
   body.classList.add('stage-editor-body');
@@ -344,6 +389,16 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   upBtn.className = 'stage-editor-files-up';
   upBtn.textContent = '↑';
   upBtn.title = 'Up one directory';
+  const rootSelect = document.createElement('select');
+  rootSelect.className = 'stage-editor-root-select';
+  rootSelect.setAttribute('aria-label', 'Workspace root');
+  rootSelect.title = 'Browse a different workspace root';
+  // Styled inline against the app's design tokens (ui/css/app.css is not this
+  // module's to edit); it sits in the 210px browser header next to the crumb.
+  rootSelect.style.cssText =
+    'background: var(--panel-3); color: var(--fg); border: 1px solid var(--border);' +
+    'border-radius: 4px; font-family: var(--font-mono); font-size: 11px;' +
+    'max-width: 82px; min-width: 0; padding: 1px 2px;';
   const crumb = document.createElement('span');
   crumb.className = 'stage-editor-files-crumb';
   crumb.textContent = '/';
@@ -353,6 +408,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   refreshBtn.textContent = '⟳';
   refreshBtn.title = 'Refresh listing';
   filePanelHeader.appendChild(upBtn);
+  filePanelHeader.appendChild(rootSelect);
   filePanelHeader.appendChild(crumb);
   filePanelHeader.appendChild(refreshBtn);
 
@@ -436,6 +492,13 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   let textarea = null;
   let dirty = false;
   let browsePath = '';
+  // Active workspace root: restored from localStorage, validated against the
+  // server's root list. `knownRoots` is empty while loading (and stays empty
+  // if the server cannot list roots), in which case the persisted id is shown
+  // as the only option and requests still carry it.
+  let activeRoot = _readPersistedRoot();
+  const knownRoots = new Map(); // id -> label
+  let rootsLoaded = false;
 
   function updateMeta() {
     filenameEl.textContent = currentFilename + (dirty ? ' •' : '');
@@ -559,19 +622,21 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     emit({ type: 'editor_engine', id: spec.__id, kind: 'editor', engine: 'monaco', reason: '' });
   }
 
+  // The first listing must use the *validated* active root: a persisted id the
+  // server no longer offers is corrected before any file request goes out.
+  const rootsReady = loadRoots();
+
   // Attach the editor engine. Monaco is loaded from the CDN; on any failure we
   // fall back to the textarea and say why.
-  loadMonaco()
-    .then((monaco) => {
-      createMonaco(monaco);
-      refreshFiles();
-      refreshEditorStatus();
-    })
-    .catch((err) => {
-      createTextareaFallback(err && err.message ? err.message : 'CDN unreachable');
-      refreshFiles();
-      refreshEditorStatus();
-    });
+  const engineReady = loadMonaco()
+    .then((monaco) => createMonaco(monaco))
+    .catch((err) =>
+      createTextareaFallback(err && err.message ? err.message : 'CDN unreachable'),
+    );
+  Promise.all([engineReady, rootsReady]).then(() => {
+    refreshFiles();
+    refreshEditorStatus();
+  });
 
   // -- value access ---------------------------------------------------------
   function getValue() {
@@ -596,6 +661,76 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       if (model) window.monaco.editor.setModelLanguage(model, monacoLanguageId(lang));
     }
   }
+
+  // -- root picker ----------------------------------------------------------
+  function renderRootOptions() {
+    const ids = knownRoots.size ? [...knownRoots.keys()] : [activeRoot || DEFAULT_ROOT_ID];
+    rootSelect.innerHTML = '';
+    for (const id of ids) {
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = knownRoots.get(id) || id;
+      // Attribute, not `select.value = ...`: identical effect in a browser,
+      // and linkedom (the DOM used by the UI tests) has a read-only value.
+      if (id === activeRoot) option.setAttribute('selected', '');
+      rootSelect.appendChild(option);
+    }
+  }
+
+  function updateCrumb() {
+    // The breadcrumb names the active root: "home:" or "home:/pkg/mod".
+    crumb.textContent = `${knownRoots.get(activeRoot) || activeRoot}:${
+      browsePath ? `/${browsePath}` : ''
+    }`;
+  }
+
+  /**
+   * Fetch the server's roots, validate the persisted selection, and build the
+   * picker. Never rejects: an unavailable roots list keeps the persisted root
+   * as the only option so the browser still works.
+   */
+  async function loadRoots() {
+    try {
+      const data = await workspaceApi.roots();
+      const fetched = (data && data.roots) || [];
+      if (!fetched.length) return;
+      rootsLoaded = true;
+      knownRoots.clear();
+      for (const root of fetched) knownRoots.set(root.id, root.label || root.id);
+      if (!knownRoots.has(activeRoot)) activeRoot = knownRoots.keys().next().value;
+      renderRootOptions();
+      updateCrumb();
+    } catch (_err) {
+      /* roots unavailable (e.g. older server): keep the persisted option */
+    }
+  }
+
+  /**
+   * Switch the active root: persist it, reset navigation and the editor's file
+   * context (an open path belongs to the *old* root and must not be saved into
+   * the new one), then relist. The buffer itself is left untouched.
+   */
+  async function switchRoot(id) {
+    if (!id || id === activeRoot) return;
+    activeRoot = id;
+    _persistRoot(id);
+    browsePath = '';
+    currentPath = null;
+    currentFilename =
+      spec.filename || (spec.language === 'javascript' ? 'script.js' : 'script.py');
+    dirty = false;
+    renderRootOptions();
+    updateCrumb();
+    updateMeta();
+    updateZedButton();
+    setStatus(`Switched to root "${knownRoots.get(id) || id}"`);
+    emit({ type: 'root_changed', id: spec.__id, kind: 'editor', root: id });
+    refreshFiles();
+  }
+
+  renderRootOptions();
+
+  rootSelect.addEventListener('change', () => switchRoot(rootSelect.value));
 
   // -- file browser ---------------------------------------------------------
   function renderEntries(data) {
@@ -634,10 +769,10 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   }
 
   async function refreshFiles() {
-    crumb.textContent = '/' + (browsePath || '');
+    updateCrumb();
     upBtn.disabled = !browsePath;
     try {
-      const data = await workspaceApi.list(browsePath);
+      const data = await workspaceApi.list(browsePath, activeRoot);
       renderEntries(data);
     } catch (err) {
       fileList.innerHTML = '';
@@ -648,10 +783,29 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     }
   }
 
-  async function openFile(path) {
-    setStatus(`Opening ${path}…`);
+  /**
+   * Open a file. With an optional `root`, switch to that root first (when it is
+   * one the server offers); an unknown id is refused here rather than sent to
+   * the server as a 400. Without `root` the active root is used.
+   */
+  async function openFile(path, root) {
+    if (root && root !== activeRoot) {
+      if (knownRoots.has(root) || !rootsLoaded) {
+        await switchRoot(root);
+      } else {
+        setStatus(`Unknown workspace root "${root}"`);
+        emit({
+          type: 'error',
+          id: spec.__id,
+          kind: 'editor',
+          message: `unknown workspace root: ${root}`,
+        });
+        return;
+      }
+    }
+    setStatus(`Opening ${path}...`);
     try {
-      const data = await workspaceApi.read(path);
+      const data = await workspaceApi.read(path, activeRoot);
       currentPath = data.path;
       currentFilename = String(data.path).split('/').pop();
       setValue(data.content);
@@ -660,7 +814,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       updateMeta();
       setStatus(`Opened ${data.path} (${data.size} B)`);
       updateZedButton();
-      emit({ type: 'open_file', id: spec.__id, kind: 'editor', path: data.path, bytes: data.size });
+      emit({ type: 'open_file', id: spec.__id, kind: 'editor', path: data.path, bytes: data.size, root: activeRoot });
     } catch (err) {
       setStatus(`Open failed: ${err.message}`);
       emit({ type: 'error', id: spec.__id, kind: 'editor', message: err.message });
@@ -717,7 +871,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     const previous = zedBtn.textContent;
     zedBtn.textContent = '⌘ Launching…';
     try {
-      const res = await workspaceApi.openInEditor(currentPath);
+      const res = await workspaceApi.openInEditor(currentPath, activeRoot);
       setStatus(`Launched ${res.binary} on ${res.path} (pid ${res.pid})`);
       emit({ type: 'open_in_zed', id: spec.__id, kind: 'editor', path: res.path, pid: res.pid });
     } catch (err) {
@@ -759,7 +913,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     if (currentPath) {
       setStatus(`Saving ${currentPath}…`);
       try {
-        const res = await workspaceApi.write(currentPath, content);
+        const res = await workspaceApi.write(currentPath, content, activeRoot);
         dirty = false;
         updateMeta();
         setStatus(`Saved ${res.path} (${res.bytes} B)`);
@@ -840,12 +994,29 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     getPath: () => currentPath,
     getFilename: () => currentFilename,
     getLanguage: () => language,
+    getRoot: () => activeRoot,
+    setRoot: (id) => switchRoot(id),
     getLineCount: () => getValue().split('\n').length,
     getTextarea: () => textarea,
     getMonaco: () => monacoEditor,
     getZedButton: () => zedBtn,
     isZedAvailable: () => zedAvailable,
   };
+
+  // Console/other-module hooks, same call shape as body.__editor.openFile:
+  //   openFile(path, root?)  -- root is optional; omit to use the active one.
+  // The flat `uapOpenWorkspaceFile` name is the canvas-bridge seam
+  // (stage.setCanvasFileOpener); it must answer truthy only when THIS editor
+  // is on screen, so a hidden editor lets stage.js open its own editor view.
+  // With several editor views alive the last-built one owns the globals.
+  if (typeof window !== 'undefined') {
+    const uap = (window.UAP = window.UAP || {});
+    uap.openFile = (path, root) => body.__editor.openFile(path, root);
+    const visible =
+      typeof body.offsetParent === 'undefined' || body.offsetParent !== null;
+    window.uapOpenWorkspaceFile = (path, root) =>
+      visible ? body.__editor.openFile(path, root) : false;
+  }
 
   return body;
 }

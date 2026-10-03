@@ -69,7 +69,7 @@ from uap.server.auth import (
     require_token,
     scrub_token_from_logs,
 )
-from uap.server.ws import build_ws_router
+from uap.server.ws import CanvasHub, build_ws_router
 from uap.server.run_control import drop_control, get_control, run_controls
 
 __all__ = ["create_app", "EventStream"]
@@ -125,6 +125,12 @@ class ProposalRequest(BaseModel):
 
     input: str
     workspace_id: str | None = None
+
+class CanvasCommandsRequest(BaseModel):
+    """A batch of UI commands to deliver to each connected browser canvas."""
+
+    commands: list[dict[str, Any]]
+
 
 class WorkspaceCreateRequest(BaseModel):
     """Body of ``POST /api/workspaces``."""
@@ -220,12 +226,14 @@ class EditorOpenRequest(BaseModel):
     """Body of ``POST /api/editor/open``."""
 
     path: str
+    root: str | None = None
 
 class WorkspaceWriteRequest(BaseModel):
     """Body of ``POST /api/workspace/files`` (save a file back to disk)."""
 
     path: str
     content: str
+    root: str | None = None
 
 class EditorStatusResponse(BaseModel):
     """Response of ``GET /api/editor/status``."""
@@ -514,6 +522,27 @@ def _workspace_root() -> Path:
         return Path(env).resolve()
     return Path.cwd().resolve()
 
+def _workspace_roots(workspace_dir: Path) -> dict[str, Path]:
+    """Configure ordered, resolved roots; reject unusable roots at startup."""
+    setting = os.environ.get("UAP_WORKSPACE_ROOTS")
+    if setting is None:
+        configured = {"workspace": workspace_dir, "home": Path.home()}
+    else:
+        configured = {}
+        for item in setting.split(","):
+            identifier, separator, location = item.strip().partition(":")
+            if not separator or not identifier or not location.strip():
+                raise ValueError(f"invalid UAP_WORKSPACE_ROOTS entry {item!r}; expected id:path")
+            if identifier in configured:
+                raise ValueError(f"duplicate workspace root id {identifier!r}")
+            configured[identifier] = Path(location.strip()).expanduser()
+    for identifier, path in configured.items():
+        resolved = path.resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"workspace root {identifier!r} is missing or not a directory: {path}")
+        configured[identifier] = resolved
+    return configured
+
 def confine_workspace_path(path: str, root: Path) -> Path:
     """Resolve ``path`` under ``root`` and refuse anything that escapes it.
 
@@ -763,6 +792,7 @@ def create_app(
     app.state.workspace_dir = (
         Path(workspace_dir).resolve() if workspace_dir is not None else _workspace_root()
     )
+    app.state.workspace_roots = _workspace_roots(app.state.workspace_dir)
     app.state.gate = gate
     app.state.entry = entry
     app.state.router = router
@@ -879,7 +909,11 @@ def create_app(
             events_getter=lambda task_id: memory_sink.query(task_id=task_id),
         )
 
-    app.include_router(build_ws_router(_ws_service_factory, workspace_dir=app.state.workspace_dir))
+    app.state.canvas_hub = CanvasHub()
+    app.include_router(build_ws_router(
+        _ws_service_factory, workspace_dir=app.state.workspace_dir,
+        canvas_hub=app.state.canvas_hub,
+    ))
 
     if _UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
@@ -2344,6 +2378,36 @@ def create_app(
             "artifacts": artifacts,
         }
 
+    @app.post("/api/canvas/commands")
+    async def send_canvas_commands(
+        request: Request, body: CanvasCommandsRequest,
+    ) -> dict[str, int]:
+        """Broadcast validated UI commands to all currently connected tabs."""
+        identity = get_current_identity(request)
+        if identity is not None and identity.role == "viewer":
+            raise HTTPException(status_code=403, detail="forbidden: viewers cannot control canvases")
+        for command in body.commands:
+            kind = command.get("type")
+            if kind == "open_file":
+                if not isinstance(command.get("path"), str) or not command["path"]:
+                    raise HTTPException(status_code=422, detail="open_file needs a path")
+                if "root" in command and not isinstance(command["root"], str):
+                    raise HTTPException(status_code=422, detail="root must be a string")
+            elif kind == "add_view":
+                if not isinstance(command.get("spec"), dict):
+                    raise HTTPException(status_code=422, detail="add_view needs a spec")
+            elif kind == "focus_view":
+                if not isinstance(command.get("id"), str):
+                    raise HTTPException(status_code=422, detail="focus_view needs an id")
+            else:
+                raise HTTPException(status_code=422, detail=f"unsupported canvas command: {kind}")
+        return {"delivered": await app.state.canvas_hub.broadcast(body.commands)}
+
+    @app.get("/api/canvas/state")
+    async def get_canvas_state() -> dict[str, list[dict[str, Any]]]:
+        """Return the most recent hello from each connected browser tab."""
+        return {"clients": app.state.canvas_hub.states()}
+
     # -- /api/resources/* ------------------------------------------------ #
 
     @app.get("/api/resources/agents")
@@ -3126,9 +3190,24 @@ def create_app(
     # the user's screen. Both routes are confined to ``workspace_dir`` with the
     # same resolve-then-check discipline the artifact store uses.
 
-    def _ws_root(request: Request) -> Path:
-        root = getattr(request.app.state, "workspace_dir", None)
-        return Path(root) if root is not None else _workspace_root()
+    def _ws_root(request: Request, root_id: str | None = None) -> Path:
+        roots = request.app.state.workspace_roots
+        selected = root_id or "workspace"
+        if selected not in roots:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown workspace root {selected!r}; valid ids: {', '.join(roots)}",
+            )
+        return roots[selected]
+
+    @app.get("/api/workspace/roots")
+    async def list_workspace_roots(request: Request) -> dict[str, Any]:
+        return {
+            "roots": [
+                {"id": identifier, "label": identifier, "path": str(path)}
+                for identifier, path in request.app.state.workspace_roots.items()
+            ]
+        }
 
     def _require_editor_writer(request: Request) -> None:
         """Auth gate for editor side effects: viewers are refused."""
@@ -3162,7 +3241,7 @@ def create_app(
           the server never waits for the editor to exit.
         """
         _require_editor_writer(request)
-        root = _ws_root(request)
+        root = _ws_root(request, body.root)
         try:
             target = confine_workspace_path(body.path, root)
         except (ValueError, PermissionError) as exc:
@@ -3224,7 +3303,7 @@ def create_app(
 
     @app.get("/api/workspace/files")
     async def list_workspace_files(
-        request: Request, path: str = ""
+        request: Request, path: str = "", root: str = "workspace"
     ) -> dict[str, Any]:
         """List one directory inside the workspace root (contained).
 
@@ -3233,7 +3312,7 @@ def create_app(
         A ``..`` traversal, an absolute path outside the root, or a symlink
         pointing out is refused with ``400``.
         """
-        root = _ws_root(request)
+        root = _ws_root(request, root)
         try:
             target = confine_workspace_path(path, root)
         except (ValueError, PermissionError) as exc:
@@ -3293,9 +3372,11 @@ def create_app(
         }
 
     @app.get("/api/workspace/file")
-    async def read_workspace_file(request: Request, path: str) -> dict[str, Any]:
-        """Read one UTF-8 text file inside the workspace root (contained)."""
-        root = _ws_root(request)
+    async def read_workspace_file(
+        request: Request, path: str, root: str = "workspace"
+    ) -> dict[str, Any]:
+        """Read one UTF-8 text file inside the selected workspace root."""
+        root = _ws_root(request, root)
         try:
             target = confine_workspace_path(path, root)
         except (ValueError, PermissionError) as exc:
@@ -3346,7 +3427,7 @@ def create_app(
         the same containment rules apply as on read.
         """
         _require_editor_writer(request)
-        root = _ws_root(request)
+        root = _ws_root(request, body.root)
         try:
             target = confine_workspace_path(body.path, root)
         except (ValueError, PermissionError) as exc:
