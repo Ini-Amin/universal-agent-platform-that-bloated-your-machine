@@ -164,9 +164,14 @@ def test_a_closed_note_can_be_brought_back(client: TestClient) -> None:
     html = client.get("/").text
     assert "close_undoable" in js and "close_undoable" in html
     assert "label: 'Undo'" in html
-    assert "persistUserView({ ...evt.spec" in html
-    # the note says where its text lives
-    assert "statusEl.textContent = 'Saved in this browser'" in js
+    assert "persistUserView({ ...restored" in html
+    # The label claims persistence only for views the page actually saves: palette
+    # launches, startup restores and Undo mark them; an agent-added note (canvas
+    # command) is never saved, so it must not say it is.
+    assert "spec.persisted === true ? 'Saved in this browser' : 'Markdown Note'" in js
+    assert "spec.persisted = true;" in html
+    assert "stage.showView({ ...spec, persisted: true });" in html
+    assert "const restored = { ...evt.spec, persisted: true };" in html
 
 
 @pytest.mark.skipif(NODE is None, reason="needs node to syntax-check the inline module script")
@@ -321,8 +326,11 @@ const closeBtn = (id) => card(id).querySelector(".stage-card-close");
 const closeAndCollect = (id) => { events.length = 0; closeBtn(id).click(); return events.map((e) => e.type).join(); };
 
 // --- Note: label, and Undo only for a note that has text ---------------------
-stage.showView({ kind: "markdown", id: "n1", title: "Note", markdown: "", editable: true });
-check("the note says where its text lives", card("n1").querySelector(".stage-note-status").textContent === "Saved in this browser");
+stage.showView({ kind: "markdown", id: "n1", title: "Note", markdown: "", editable: true, persisted: true });
+check("a note the page saves says where its text lives", card("n1").querySelector(".stage-note-status").textContent === "Saved in this browser");
+stage.showView({ kind: "markdown", id: "agent", title: "Agent note", markdown: "", editable: true });
+check("a note nothing saves does not claim to be saved", card("agent").querySelector(".stage-note-status").textContent === "Markdown Note");
+closeAndCollect("agent");
 const textarea = card("n1").querySelector(".stage-note-textarea");
 textarea.value = "# Draft\n\nkeep me ☕";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));

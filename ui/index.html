@@ -1000,6 +1000,9 @@
       delete spec.urlPlaceholder;
       delete spec.hint;
       delete spec.defaultTitle;
+      // Everything launched from the palette is saved in this browser
+      // (persistUserView below); the stage uses the flag to say so on the card.
+      spec.persisted = true;
       // Every user-opened view gets a stable, unique id so it persists and
       // reloads as the SAME card (id also makes the stage replace-not-duplicate).
       if (!spec.id) {
@@ -1060,7 +1063,7 @@
     if (activeUserViews.length > 0) {
       for (const spec of activeUserViews) {
         try {
-          stage.showView(spec);
+          stage.showView({ ...spec, persisted: true });
         } catch (e) {
           console.warn('Failed to restore user view:', spec, e);
         }
@@ -1427,7 +1430,8 @@
             label: 'Undo',
             onClick: (t) => {
               dismissToast(t.id);
-              persistUserView({ ...evt.spec, id: stage.showView(evt.spec) });
+              const restored = { ...evt.spec, persisted: true };
+              persistUserView({ ...restored, id: stage.showView(restored) });
             },
           }],
         });

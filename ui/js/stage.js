@@ -316,7 +316,10 @@ export function buildMarkdownBody(body, spec, emit = () => {}) {
 
   const statusEl = document.createElement('span');
   statusEl.className = 'stage-note-status';
-  statusEl.textContent = 'Saved in this browser';
+  // Only the host knows whether it keeps this note: index.html saves the ones it
+  // opens and marks them `persisted`. A note an agent adds through a canvas
+  // command lives only on the page, so it keeps the neutral label.
+  statusEl.textContent = spec.persisted === true ? 'Saved in this browser' : 'Markdown Note';
 
   toolbar.appendChild(tabsWrap);
   toolbar.appendChild(statusEl);
