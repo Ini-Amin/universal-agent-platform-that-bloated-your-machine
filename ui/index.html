@@ -2515,7 +2515,7 @@
     // What the header says about the selected run. The task box is cleared on
     // submit and the label was a UUID fragment, so after a run nothing on screen
     // said which task was showing, and "Ready to run" never changed.
-    const RUN_STATUS_VERB = { connecting: 'Loading', running: 'Running', completed: 'Completed', failed: 'Failed', paused: 'Paused' };
+    const RUN_STATUS_VERB = { connecting: 'Loading', running: 'Running', completed: 'Completed', failed: 'Failed', paused: 'Paused', awaiting_approval: 'Needs approval' };
     function renderRunContext(state) {
       const taskText = (state.task && state.task.input ? String(state.task.input) : '').trim();
       const meta = document.getElementById('task-context-meta');
@@ -2539,10 +2539,18 @@
     }
 
     let _lastTerminalRefresh = null;
+    let _approvalSeenKey = '';
     // Run started from this page: its finish should surface the answer.
     let watchedRunId = null;
     executionStore.subscribe((state) => {
       renderRunContext(state);
+      // A blocked action needs a person: bring the output pane (where the
+      // Approve / Reject buttons are) into view the first time it appears.
+      const waiting = ((state.task && state.task.pending_approvals) || [])
+        .filter((a) => a && a.approval_id && (a.state || 'pending_approval') === 'pending_approval');
+      const waitingKey = waiting.length ? `${state.executionId}:${waiting.map((a) => a.approval_id).join(',')}` : '';
+      if (waitingKey && waitingKey !== _approvalSeenKey) revealOutput();
+      _approvalSeenKey = waitingKey;
       const badge = document.getElementById('active-status-badge');
       if (badge) {
         badge.textContent = state.status;

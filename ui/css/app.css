@@ -256,6 +256,7 @@ body {
 .run-status-indicator .status-dot.status-dot-completed { background: var(--ok); }
 .run-status-indicator .status-dot.status-dot-failed { background: var(--err); }
 .run-status-indicator .status-dot.status-dot-paused { background: var(--warn); }
+.run-status-indicator .status-dot.status-dot-awaiting_approval { background: var(--warn); }
 .run-status-indicator .status-dot.status-dot-idle,
 .run-status-indicator .status-dot.status-dot-pending,
 .run-status-indicator .status-dot.status-dot-skipped,
@@ -454,6 +455,7 @@ body {
 .history-item .status-dot-failed { background: var(--err); }
 .history-item .status-dot-running { background: var(--accent); }
 .history-item .status-dot-paused { background: var(--warn); }
+.history-item .status-dot-awaiting_approval { background: var(--warn); }
 .history-item .status-dot-pending,
 .history-item .status-dot-accepted { background: var(--fg-muted); }
 .history-text {
@@ -1225,6 +1227,7 @@ button:disabled {
 .badge-completed { color: var(--ok); border-color: var(--ok); }
 .badge-failed { color: var(--err); border-color: var(--err); }
 .badge-paused { color: var(--warn); border-color: var(--warn); }
+.badge-awaiting_approval { color: var(--warn); border-color: var(--warn); }
 .badge-idle { color: var(--fg-muted); border-color: var(--border); }
 .badge-connecting { color: var(--accent); border-color: var(--accent); }
 .badge-reconnecting { color: var(--warn); border-color: var(--warn); }

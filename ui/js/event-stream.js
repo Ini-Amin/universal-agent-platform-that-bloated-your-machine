@@ -16,6 +16,13 @@ export function createEventStream() {
   // idle | connecting | open | reconnecting | closed
   let connectionStatus = 'idle';
   const statusListeners = new Set();
+  // Approval events and pause states change GET /tasks/{id}'s pending_approvals.
+  // Refetch it at most once per window (a reconnect replays every event) and
+  // never with two requests in flight.
+  const TASK_SYNC_DELAY_MS = 250;
+  let taskSyncTimer = null;
+  let taskSyncRunning = false;
+  let taskSyncQueued = false;
 
   function setStatus(next) {
     if (next === connectionStatus) return;
@@ -48,6 +55,7 @@ export function createEventStream() {
     if (currentExecutionId !== executionId) {
       lastSeenSeq = 0;
       eventStore.setState({ events: [] });
+      _cancelTaskSync();
     }
     currentExecutionId = executionId;
     manuallyClosed = false;
@@ -119,12 +127,37 @@ export function createEventStream() {
             output: task.output !== undefined && task.output !== null ? task.output : executionStore.getState().output,
             error: task.error !== undefined && task.error !== null ? task.error : executionStore.getState().error,
             artifacts: Array.isArray(task.artifacts) ? task.artifacts : (executionStore.getState().artifacts || []),
+            task,
           });
         }
       }
     } catch {
       // ignore network errors during poll
     }
+  }
+
+  function _scheduleTaskSync() {
+    if (taskSyncTimer) return;
+    taskSyncTimer = setTimeout(async () => {
+      taskSyncTimer = null;
+      if (taskSyncRunning) {
+        taskSyncQueued = true;
+        return;
+      }
+      taskSyncRunning = true;
+      await _syncTaskDetails(currentExecutionId);
+      taskSyncRunning = false;
+      if (taskSyncQueued) {
+        taskSyncQueued = false;
+        _scheduleTaskSync();
+      }
+    }, TASK_SYNC_DELAY_MS);
+  }
+
+  function _cancelTaskSync() {
+    if (taskSyncTimer) clearTimeout(taskSyncTimer);
+    taskSyncTimer = null;
+    taskSyncQueued = false;
   }
 
   function _handleMessage(msg) {
@@ -142,6 +175,8 @@ export function createEventStream() {
       });
       if (currentExecutionId && (newStatus === 'completed' || newStatus === 'failed')) {
         _syncTaskDetails(currentExecutionId);
+      } else if (newStatus === 'paused' || newStatus === 'awaiting_approval') {
+        _scheduleTaskSync();
       }
     } else if (msg.type === 'event') {
       const ev = msg.event || {};
@@ -164,6 +199,8 @@ export function createEventStream() {
 
       // Update node status overlay from lifecycle events
       const kind = ev.kind || '';
+      // `approval` (event bus) and `approval_requested` / `approval_decided` (durable events).
+      if (kind.includes('approval')) _scheduleTaskSync();
       const nodeId = ev.node || (ev.payload && (ev.payload.node_id || ev.payload.node));
       if (nodeId) {
         let nodeStatus = null;
@@ -204,6 +241,7 @@ export function createEventStream() {
 
   function disconnect() {
     manuallyClosed = true;
+    _cancelTaskSync();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
