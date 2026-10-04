@@ -359,6 +359,29 @@ const NOISE_DIRS = new Set([
   '.mypy_cache',
 ]);
 
+// Card widths below which the file tree starts collapsed / buttons go icon-only.
+const NARROW_WIDTH = 600;
+const COMPACT_WIDTH = 480;
+
+// Toolbar button = icon + label. In compact cards CSS hides the label visually
+// but keeps it as the accessible name.
+function _toolbarBtn(cls, icon, label, title) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `stage-editor-btn ${cls}`;
+  btn.title = title;
+  btn.innerHTML =
+    '<span class="stage-editor-btn-icon" aria-hidden="true"></span><span class="stage-editor-btn-label"></span>';
+  btn.firstChild.textContent = icon;
+  btn.lastChild.textContent = label;
+  return btn;
+}
+
+function _setBtn(btn, label, icon) {
+  btn.lastChild.textContent = label;
+  if (icon) btn.firstChild.textContent = icon;
+}
+
 /**
  * Build the editor view. Returns synchronously with a complete shell; Monaco
  * (or its textarea fallback) is attached asynchronously.
@@ -388,30 +411,31 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   const actionsGroup = document.createElement('div');
   actionsGroup.className = 'stage-editor-actions';
 
-  const filesBtn = document.createElement('button');
-  filesBtn.type = 'button';
-  filesBtn.className = 'stage-editor-btn stage-editor-files-btn';
-  filesBtn.textContent = '📁 Files';
-  filesBtn.title = 'Show or hide the workspace file browser';
-
-  const zedBtn = document.createElement('button');
-  zedBtn.type = 'button';
-  zedBtn.className = 'stage-editor-btn stage-editor-zed-btn';
-  zedBtn.textContent = '⌘ Open in Zed';
-  zedBtn.title = 'Open this file in the Zed editor on the server machine';
+  const filesBtn = _toolbarBtn(
+    'stage-editor-files-btn is-active',
+    '📁',
+    'Files',
+    'Show or hide the workspace file browser',
+  );
+  const zedBtn = _toolbarBtn(
+    'stage-editor-zed-btn',
+    '⌘',
+    'Open in Zed',
+    'Open this file in the Zed editor on the server machine',
+  );
   zedBtn.disabled = true;
-
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.className = 'stage-editor-btn stage-editor-save-btn';
-  saveBtn.textContent = '💾 Save';
-  saveBtn.title = 'Save the active tab buffer to the workspace';
-
-  const runBtn = document.createElement('button');
-  runBtn.type = 'button';
-  runBtn.className = 'stage-editor-btn stage-editor-run-btn';
-  runBtn.textContent = '▶ Run';
-  runBtn.title = 'Execute the code against the backend sandbox';
+  const saveBtn = _toolbarBtn(
+    'stage-editor-save-btn',
+    '💾',
+    'Save',
+    'Save the active tab buffer to the workspace',
+  );
+  const runBtn = _toolbarBtn(
+    'stage-editor-run-btn',
+    '▶',
+    'Run',
+    'Execute the code against the backend sandbox',
+  );
 
   actionsGroup.appendChild(filesBtn);
   actionsGroup.appendChild(zedBtn);
@@ -560,6 +584,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   const statusMsg = document.createElement('span');
   statusMsg.className = 'stage-editor-status-msg';
   statusMsg.textContent = 'Ready';
+  statusMsg.setAttribute('role', 'status');
 
   statusbarLeft.appendChild(engineEl);
   statusbarLeft.appendChild(statusMsg);
@@ -595,12 +620,16 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   const outputTitle = document.createElement('span');
   outputTitle.className = 'stage-editor-output-title';
   outputTitle.textContent = 'Execution Output';
+  const outputStatus = document.createElement('span');
+  outputStatus.className = 'stage-editor-output-status';
+  outputStatus.setAttribute('role', 'status');
   const outputCloseBtn = document.createElement('button');
   outputCloseBtn.type = 'button';
   outputCloseBtn.className = 'stage-editor-output-close';
   outputCloseBtn.textContent = '✕';
   outputCloseBtn.title = 'Close output';
   outputHeader.appendChild(outputTitle);
+  outputHeader.appendChild(outputStatus);
   outputHeader.appendChild(outputCloseBtn);
 
   const outputContent = document.createElement('pre');
@@ -658,6 +687,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
 
   function setStatus(msg) {
     statusMsg.textContent = msg;
+    statusMsg.title = msg;
   }
 
   function _persistState() {
@@ -1033,6 +1063,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       wordBasedSuggestions: true,
       multiCursorModifier: 'alt',
       renderWhitespace: 'selection',
+      automaticLayout: true,
     });
 
     if (
@@ -1217,9 +1248,13 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       setStatus(`Opened folder "${res.label}" (${res.path || path})`);
     } catch (err) {
       setStatus(`Open folder failed: ${err.message}`);
-      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-        window.alert(`Could not open folder "${path}": ${err.message}`);
-      }
+      emit({
+        type: 'error',
+        id: spec.__id,
+        kind: 'editor',
+        title: 'Open folder failed',
+        message: `Could not open folder "${path}": ${err.message}`,
+      });
     }
   }
 
@@ -1351,6 +1386,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       errEl.className = 'stage-editor-files-error';
       errEl.textContent = `Could not list workspace: ${err.message}`;
       fileList.appendChild(errEl);
+      setStatus(errEl.textContent); // the tree may be collapsed in a narrow card
     }
   }
 
@@ -1367,6 +1403,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
           type: 'error',
           id: spec.__id,
           kind: 'editor',
+          title: 'Open failed',
           message: `unknown workspace root: ${root}`,
         });
         return;
@@ -1430,7 +1467,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
       });
     } catch (err) {
       setStatus(`Open failed: ${err.message}`);
-      emit({ type: 'error', id: spec.__id, kind: 'editor', message: err.message });
+      emit({ type: 'error', id: spec.__id, kind: 'editor', title: 'Open failed', message: err.message });
     }
   }
 
@@ -1442,10 +1479,33 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     refreshFiles();
   });
   refreshBtn.addEventListener('click', () => refreshFiles());
-  filesBtn.addEventListener('click', () => {
-    const hidden = filePanel.classList.toggle('is-hidden');
+
+  // Narrow cards (Split 2 on a laptop) start with the tree collapsed. The Files
+  // button still toggles it, and that choice sticks until the card crosses the
+  // width threshold again.
+  let filesAuto = true;
+  let wasNarrow = null;
+  function setFilesHidden(hidden) {
+    filePanel.classList.toggle('is-hidden', hidden);
     filesBtn.classList.toggle('is-active', !hidden);
+  }
+  filesBtn.addEventListener('click', () => {
+    filesAuto = false;
+    setFilesHidden(!filePanel.classList.contains('is-hidden'));
   });
+  function adaptToWidth(width) {
+    if (!width) return;
+    container.classList.toggle('is-compact', width < COMPACT_WIDTH);
+    const narrow = width < NARROW_WIDTH;
+    if (narrow !== wasNarrow) {
+      wasNarrow = narrow;
+      filesAuto = true;
+    }
+    if (filesAuto) setFilesHidden(narrow);
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver((entries) => adaptToWidth(entries[0].contentRect.width)).observe(container);
+  }
 
   // -- Open in Zed ----------------------------------------------------------
 
@@ -1453,7 +1513,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     try {
       const status = await workspaceApi.editorStatus();
       zedAvailable = !!status.available;
-      zedBtn.textContent = zedAvailable ? '⌘ Open in Zed' : '⌘ Zed not installed';
+      _setBtn(zedBtn, zedAvailable ? 'Open in Zed' : 'Zed not installed');
       if (!zedAvailable) {
         zedBtn.title = status.reason || 'editor not installed';
         emit({ type: 'editor_status', id: spec.__id, kind: 'editor', available: false, reason: status.reason });
@@ -1462,7 +1522,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     } catch (err) {
       zedAvailable = false;
       zedBtn.disabled = true;
-      zedBtn.textContent = '⌘ Zed unavailable';
+      _setBtn(zedBtn, 'Zed unavailable');
       zedBtn.title = err.message;
     }
   }
@@ -1471,17 +1531,17 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
     const activePath = activeTab ? activeTab.path : currentPath;
     if (!activePath) return;
     zedBtn.disabled = true;
-    const previous = zedBtn.textContent;
-    zedBtn.textContent = '⌘ Launching…';
+    const previous = zedBtn.lastChild.textContent;
+    _setBtn(zedBtn, 'Launching…');
     try {
       const res = await workspaceApi.openInEditor(activePath, activeRoot);
       setStatus(`Launched ${res.binary} on ${res.path} (pid ${res.pid})`);
       emit({ type: 'open_in_zed', id: spec.__id, kind: 'editor', path: res.path, pid: res.pid });
     } catch (err) {
       setStatus(`Zed launch failed: ${err.message}`);
-      emit({ type: 'error', id: spec.__id, kind: 'editor', message: err.message });
+      emit({ type: 'error', id: spec.__id, kind: 'editor', title: 'Zed launch failed', message: err.message });
     } finally {
-      zedBtn.textContent = previous;
+      _setBtn(zedBtn, previous);
       updateZedButton();
     }
   });
@@ -1530,7 +1590,7 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
         return;
       } catch (err) {
         setStatus(`Save failed: ${err.message}`);
-        emit({ type: 'error', id: spec.__id, kind: 'editor', message: err.message });
+        emit({ type: 'error', id: spec.__id, kind: 'editor', title: 'Save failed', message: err.message });
         return;
       }
     }
@@ -1542,49 +1602,80 @@ export function buildEditorBody(body, spec = {}, emit = () => {}) {
   saveBtn.addEventListener('click', handleSave);
 
   // -- Run ------------------------------------------------------------------
+  // Output is a list of [text, className] spans: stdout plain, stderr labelled.
+  function showRunOutput(parts, ok, headline) {
+    outputContent.textContent = '';
+    for (const [text, cls] of parts) {
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = text;
+      outputContent.appendChild(span);
+    }
+    outputStatus.className = `stage-editor-output-status ${ok ? 'is-ok' : 'is-fail'}`;
+    outputStatus.textContent = headline ? `${ok ? '✓' : '✕'} ${headline}` : '';
+  }
+
+  // Success means exit status 0, not merely HTTP 200.
+  function showRunResult(res, data, elapsed) {
+    const obj = data && typeof data === 'object' ? data : null;
+    const exit = obj && Number.isInteger(obj.exit_code) ? obj.exit_code : null;
+    const timedOut = exit === 124 && /timeout/i.test(obj.stderr || '');
+    let label = 'Done';
+    if (!res.ok) label = `Run failed (HTTP ${res.status})`;
+    else if (timedOut) label = 'Timed out';
+    else if (exit) label = `Exited with code ${exit}`;
+
+    const parts = [];
+    let error = null;
+    if (!res.ok) {
+      const detail = obj ? (obj.detail !== undefined ? obj.detail : obj) : data;
+      error = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      parts.push([`HTTP ${res.status}: ${error}\n`, 'is-stderr']);
+    } else if (exit === null) {
+      parts.push([obj ? JSON.stringify(obj, null, 2) : String(data), '']);
+    } else {
+      if (obj.stdout) parts.push([obj.stdout, '']);
+      if (obj.stderr) {
+        parts.push([`${obj.stdout ? '\n' : ''}stderr\n`, 'is-label'], [obj.stderr, 'is-stderr']);
+      }
+      if (!parts.length) parts.push(['(no output)\n', 'is-muted']);
+    }
+    showRunOutput(parts, res.ok && !exit, `${label} · ${elapsed} ms`);
+    setStatus(label);
+    return { exit, error };
+  }
+
   async function handleRun() {
     runBtn.disabled = true;
-    runBtn.textContent = '⏳ Running...';
-    setStatus('Executing...');
+    _setBtn(runBtn, 'Running…', '⏳');
+    setStatus('Executing…');
     outputDrawer.classList.add('is-visible');
-    outputContent.textContent = 'Executing code against backend...\n';
+    body.scrollTop = body.scrollHeight; // a short card scrolls; keep the output in view
+    showRunOutput([['Executing code against backend…\n', 'is-muted']], true, '');
 
     const code = getValue();
     const endpoint = spec.runEndpoint || '/api/sandbox/run';
     const payload = spec.runEndpoint ? { code } : { language, code };
-    const startTime =
-      typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+    const startTime = Date.now();
     try {
-      if (typeof fetch === 'function') {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const elapsed = Math.round(
-          (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) -
-            startTime,
-        );
-        let data;
-        const contentType = response.headers ? response.headers.get('content-type') || '' : '';
-        data = contentType.includes('application/json') ? await response.json() : await response.text();
-
-        let formatted = `[Execution target: ${endpoint}]\n`;
-        formatted += `HTTP ${response.status} ${response.statusText} (${elapsed}ms)\n\n`;
-        formatted += typeof data === 'object' ? JSON.stringify(data, null, 2) : data;
-        outputContent.textContent = formatted;
-        setStatus(response.ok ? `Done (${response.status})` : `Failed (${response.status})`);
-        emit({ type: 'run', id: spec.__id, kind: 'editor', endpoint, status: response.status, elapsed, response: data });
-      } else {
-        outputContent.textContent = '[Execution mock]: fetch is not available in this environment';
-      }
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: _authHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const elapsed = Date.now() - startTime;
+      const isJson = ((res.headers && res.headers.get('content-type')) || '').includes('application/json');
+      const data = isJson ? await res.json().catch(() => null) : await res.text().catch(() => '');
+      const { exit, error } = showRunResult(res, data, elapsed);
+      emit({ type: 'run', id: spec.__id, kind: 'editor', endpoint, status: res.status, elapsed, exit_code: exit, response: data });
+      if (error) emit({ type: 'error', id: spec.__id, kind: 'editor', title: 'Run failed', message: `HTTP ${res.status}: ${error}` });
     } catch (err) {
-      outputContent.textContent = `[Network / Execution Error]\n${err.message}`;
-      setStatus('Execution error');
-      emit({ type: 'error', id: spec.__id, kind: 'editor', message: err.message });
+      showRunOutput([[`Network / execution error: ${err.message}\n`, 'is-stderr']], false, 'Execution error');
+      setStatus(`Execution error: ${err.message}`);
+      emit({ type: 'error', id: spec.__id, kind: 'editor', title: 'Run failed', message: err.message });
     } finally {
       runBtn.disabled = false;
-      runBtn.textContent = '▶ Run';
+      _setBtn(runBtn, 'Run', '▶');
     }
   }
   runBtn.addEventListener('click', handleRun);

@@ -2956,6 +2956,12 @@ export function createStage(containerEl, options = {}) {
     return `${rawTitle}${ext}`;
   }
 
+  // An editor card's spec.code is only the template it started from; the real
+  // buffer lives in the editor instance mounted in the card body.
+  function liveEditor(spec) {
+    return spec.kind === 'editor' ? editorInstanceOf(views.get(String(spec.__id))) : null;
+  }
+
   function getViewTextContent(spec) {
     if (spec.kind === 'markdown') {
       return spec.markdown !== undefined ? spec.markdown : spec.text;
@@ -2967,6 +2973,8 @@ export function createStage(containerEl, options = {}) {
       return spec.text !== undefined ? spec.text : spec.code;
     }
     if (spec.kind === 'editor') {
+      const live = liveEditor(spec);
+      if (live && typeof live.getValue === 'function') return live.getValue();
       return spec.text !== undefined ? spec.text : (spec.code !== undefined ? spec.code : '');
     }
     if (typeof spec.text === 'string') {
@@ -2992,7 +3000,7 @@ export function createStage(containerEl, options = {}) {
     // An editable note starts empty, so `textContent` is '' at build time; the
     // button must still appear and copy whatever the user has typed since.
     const copyTarget = typeof textContent === 'string' ? textContent : viewUrl;
-    if (typeof copyTarget === 'string' && (copyTarget.length > 0 || spec.editable)) {
+    if (typeof copyTarget === 'string' && (copyTarget.length > 0 || spec.editable || spec.kind === 'editor')) {
       const copyBtn = document.createElement('button');
       copyBtn.type = 'button';
       copyBtn.className = 'stage-card-action-btn stage-card-btn-copy';
@@ -3043,7 +3051,8 @@ export function createStage(containerEl, options = {}) {
         dlBtn.setAttribute('aria-label', 'Download as file');
         dlBtn.textContent = 'Download';
         dlBtn.addEventListener('click', () => {
-          const filename = getDownloadFilename(spec);
+          const editor = liveEditor(spec);
+          const filename = (editor && editor.getFilename && editor.getFilename()) || getDownloadFilename(spec);
           const mime = spec.kind === 'html' ? 'text/html;charset=utf-8'
             : spec.kind === 'markdown' ? 'text/markdown;charset=utf-8'
             : 'text/plain;charset=utf-8';

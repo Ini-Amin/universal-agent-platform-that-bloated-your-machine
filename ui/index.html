@@ -1207,8 +1207,12 @@
     window.addEventListener('offline', () => checkConnection());
     checkConnection();
 
-    // DEF-11: Global Ctrl+S and Ctrl+Enter keyboard listeners
+    // DEF-11: Global Ctrl+S and Ctrl+Enter keyboard listeners. They never hijack
+    // typing in an input/textarea/contenteditable (terminal prompt, textarea
+    // editor) and never repeat a shortcut a widget already handled.
     document.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if (e.defaultPrevented || (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable))) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         const saveBtn = document.querySelector('.stage-editor-save-btn');
@@ -1444,6 +1448,8 @@
           title: 'Saved',
           message: evt.path ? `Saved ${evt.path} (${evt.bytes || 0} B)` : `Saved ${evt.filename || 'file'}`
         });
+      } else if (evt.type === 'error' && evt.kind === 'editor') {
+        showToast({ kind: 'error', title: evt.title || 'Editor error', message: evt.message || 'The editor reported an error.' });
       } else if (evt.type === 'note_change') {
         const found = activeUserViews.find((v) => specKey(v) === String(evt.id));
         if (found) {

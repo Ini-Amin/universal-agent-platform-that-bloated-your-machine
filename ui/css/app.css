@@ -2761,7 +2761,10 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 0;
+  /* Monaco is never squeezed: below this height the card body scrolls instead.
+     = 180px editor + toolbar, tabs, breadcrumbs and status bar. */
+  min-height: 316px;
+  position: relative;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -2772,12 +2775,13 @@ textarea:focus-visible,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: 4px 8px;
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
-  gap: 12px;
-  flex-wrap: wrap;
-  min-height: 42px;
+  gap: 8px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  min-height: 38px;
 }
 
 .stage-editor-meta {
@@ -2785,6 +2789,7 @@ textarea:focus-visible,
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .stage-editor-filename {
@@ -2792,6 +2797,10 @@ textarea:focus-visible,
   font-size: 12px;
   font-weight: 600;
   color: var(--fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stage-editor-lang {
@@ -2803,12 +2812,13 @@ textarea:focus-visible,
   padding: 2px 6px;
   border-radius: 4px;
   font-family: var(--font-mono);
+  flex-shrink: 0;
 }
 
 .stage-editor-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
@@ -2818,16 +2828,38 @@ textarea:focus-visible,
   color: var(--fg);
   border-radius: 4px;
   font-size: 11px;
-  padding: 6px 12px;
+  padding: 4px 10px;
   cursor: pointer;
-  min-height: 32px;
+  min-height: 28px;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
   font-weight: 500;
 }
 
 .stage-editor-btn:hover { border-color: var(--accent); }
+
+/* Narrow cards: icon-only toolbar buttons (the label stays as the accessible
+   name) and a status bar with room for messages. */
+.stage-editor-container.is-compact .stage-editor-btn {
+  min-width: 30px;
+  padding: 4px 6px;
+}
+.stage-editor-container.is-compact .stage-editor-btn-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.stage-editor-container.is-compact .stage-editor-statusbar-right .stage-editor-encoding,
+.stage-editor-container.is-compact .stage-editor-statusbar-right .stage-editor-lang {
+  display: none;
+}
 
 .stage-editor-run-btn {
   background: var(--accent-muted);
@@ -2903,10 +2935,16 @@ textarea:focus-visible,
 
 .stage-editor-output-drawer {
   display: none;
+  /* Overlays the editor above the status bar, so Run never resizes it. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  z-index: 5;
   flex-direction: column;
   border-top: 2px solid var(--accent);
   background: var(--bg);
-  max-height: 180px;
+  max-height: min(220px, 55%);
 }
 
 .stage-editor-output-drawer.is-visible {
@@ -2922,7 +2960,21 @@ textarea:focus-visible,
   font-size: 11px;
   font-weight: 600;
   color: var(--fg);
+  flex-shrink: 0;
 }
+
+.stage-editor-output-status {
+  flex: 1;
+  min-width: 0;
+  margin-left: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-editor-output-status.is-ok { color: var(--ok); }
+.stage-editor-output-status.is-fail { color: var(--err); }
 
 .stage-editor-output-close {
   background: none;
@@ -2943,17 +2995,21 @@ textarea:focus-visible,
   font-size: 11px;
   line-height: 1.4;
   color: var(--fg);
-  overflow-y: auto;
-  max-height: 140px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
+.stage-editor-output-content .is-stderr { color: var(--err); }
+.stage-editor-output-content .is-label,
+.stage-editor-output-content .is-muted { color: var(--fg-muted); }
 
 /* --- Real editor: Monaco host, file browser, engine badge, Zed button --- */
 .stage-editor-host {
   flex: 1;
   min-width: 0;
-  min-height: 0;
+  min-height: 180px;
   position: relative;
   overflow: hidden;
 }
@@ -3823,6 +3879,11 @@ body.stage-fullscreen .stage-card-exit-fill {
 .stage-card.stage-card-filled .stage-editor-host {
   flex: 1 1 auto !important;
   min-height: 0 !important;
+}
+
+/* The floating "Exit fill" button covers the toolbar's right edge (it hid Run). */
+.stage-card.stage-card-filled .stage-editor-toolbar {
+  padding-right: 108px;
 }
 
 /* ==========================================================================
