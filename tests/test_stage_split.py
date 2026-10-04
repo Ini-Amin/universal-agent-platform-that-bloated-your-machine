@@ -131,8 +131,9 @@ check("mode switched", stage.getSplitMode() === 2);
 check("two regions", document.querySelectorAll(".stage-region").length === 2);
 check("one divider", document.querySelectorAll(".stage-split-divider").length === 1);
 check("grid has split classes", grid.classList.contains("stage-grid-split") && grid.classList.contains("stage-grid-split-2"));
-check("cards moved into region 0", Array.from(document.querySelectorAll(".stage-card"))
-  .every((el) => el.parentElement === document.querySelector('.stage-region[data-region="0"]')));
+// cards without a remembered region go to the least-loaded one (ties: lowest index)
+check("cards spread over both regions", ["a", "b", "c"]
+  .map((id) => card(id).parentElement.getAttribute("data-region")).join() === "0,1,0");
 check("empty region hints rendered", document.querySelectorAll(".stage-region-empty").length === 2);
 check("zoom is inert in split", (stage.zoomIn(), grid.style.transform === "none"));
 check("ratio var default", grid.style.getPropertyValue("--split-x") === "0.5fr");
@@ -143,7 +144,7 @@ stage.onEvent((e) => { if (e.type === "region") regionEvents.push(e); });
 check("setViewRegion ok", stage.setViewRegion("a", 1) === true);
 check("card re-parented", card("a").parentElement === document.querySelector('.stage-region[data-region="1"]'));
 check("region event", regionEvents.length === 1 && regionEvents[0].id === "a" && regionEvents[0].region === 1);
-check("getViewRegion follows", stage.getViewRegion("a") === 1 && stage.getViewRegion("b") === 0);
+check("getViewRegion follows", stage.getViewRegion("a") === 1 && stage.getViewRegion("c") === 0);
 check("region persisted", store.get("uap.stage.split.region.a") === "1");
 const posA = JSON.parse(store.get("uap.stage.split.pos.a"));
 check("split position persisted", typeof posA.x === "number" && typeof posA.y === "number");
